@@ -23,6 +23,18 @@ import (
 
 var fixedTime = time.Date(2026, 7, 23, 9, 0, 0, 0, time.FixedZone("CST", 8*60*60))
 
+func xmlTextForTest(payload []byte, name string) string {
+	value := string(payload)
+	startTag := "<" + name + ">"
+	endTag := "</" + name + ">"
+	start := strings.Index(value, startTag)
+	end := strings.Index(value, endTag)
+	if start < 0 || end < 0 || end < start {
+		return ""
+	}
+	return value[start+len(startTag) : end]
+}
+
 func testServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	handler := api.NewHandler(adapter.NewMockProviderWithClock(func() time.Time { return fixedTime }))
@@ -499,6 +511,9 @@ func TestPlayerReadContractIncludesProgressQueueAndStations(t *testing.T) {
 	if _, ok := data["positionSeconds"]; !ok {
 		t.Fatalf("player progress is missing: %#v", data)
 	}
+	if _, ok := data["volume"]; !ok {
+		t.Fatalf("player volume is missing: %#v", data)
+	}
 	if len(data["queue"].([]any)) != 1 || len(data["stations"].([]any)) != 1 {
 		t.Fatalf("player queue or stations are missing: %#v", data)
 	}
@@ -506,12 +521,14 @@ func TestPlayerReadContractIncludesProgressQueueAndStations(t *testing.T) {
 
 func TestRealModeControlsKPlayerThroughValidatedPlayerAPI(t *testing.T) {
 	transport := "STOPPED"
+	volume := 30
 	kplayer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
-			fmt.Fprint(w, `<?xml version="1.0"?><root><device><serviceList><service><serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType><controlURL>/av/control.xml</controlURL></service></serviceList></device></root>`)
+			fmt.Fprint(w, `<?xml version="1.0"?><root><device><serviceList><service><serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType><controlURL>/av/control.xml</controlURL></service><service><serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType><controlURL>/render/control.xml</controlURL></service></serviceList></device></root>`)
 			return
 		}
 		action := strings.Trim(r.Header.Get("SOAPACTION"), `"`)
+		payload, _ := io.ReadAll(r.Body)
 		switch {
 		case strings.HasSuffix(action, "#Play"):
 			transport = "PLAYING"
@@ -524,6 +541,11 @@ func TestRealModeControlsKPlayerThroughValidatedPlayerAPI(t *testing.T) {
 			return
 		case strings.HasSuffix(action, "#GetPositionInfo"):
 			fmt.Fprint(w, `<TrackDuration>00:00:13</TrackDuration><RelTime>00:00:02</RelTime>`)
+			return
+		case strings.HasSuffix(action, "#SetVolume"):
+			volume, _ = strconv.Atoi(xmlTextForTest(payload, "DesiredVolume"))
+		case strings.HasSuffix(action, "#GetVolume"):
+			fmt.Fprintf(w, `<CurrentVolume>%d</CurrentVolume>`, volume)
 			return
 		}
 		fmt.Fprint(w, `<ok/>`)
@@ -562,6 +584,10 @@ func TestRealModeControlsKPlayerThroughValidatedPlayerAPI(t *testing.T) {
 	if strings.Contains(current["source"].(string), "token") {
 		t.Fatalf("media query leaked into API response: %#v", current)
 	}
+	player = control(`{"action":"volume_set","volume":25}`)
+	if player["volume"].(map[string]any)["value"] != float64(25) {
+		t.Fatalf("KPlayer volume was not verified: %#v", player)
+	}
 	player = control(`{"action":"timer_set","durationMinutes":60}`)
 	stopTimer := player["stopTimer"].(map[string]any)
 	if stopTimer["active"] != true || stopTimer["remainingSeconds"].(float64) != float64(3600) {
@@ -597,5 +623,27 @@ func TestRealModeControlsKPlayerThroughValidatedPlayerAPI(t *testing.T) {
 	invalidTimerResponse.Body.Close()
 	if invalidTimerResponse.StatusCode != http.StatusBadRequest {
 		t.Fatalf("oversized stop timer returned %d", invalidTimerResponse.StatusCode)
+	}
+
+	invalidVolume, _ := http.NewRequest(http.MethodPost, server.URL+api.BasePath+"/player/control", strings.NewReader(`{"action":"volume_set","volume":101}`))
+	invalidVolume.Header.Set("Content-Type", "application/json")
+	invalidVolumeResponse, err := server.Client().Do(invalidVolume)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidVolumeResponse.Body.Close()
+	if invalidVolumeResponse.StatusCode != http.StatusBadRequest {
+		t.Fatalf("out-of-range volume returned %d", invalidVolumeResponse.StatusCode)
+	}
+
+	inactiveVolume, _ := http.NewRequest(http.MethodPost, server.URL+api.BasePath+"/player/control", strings.NewReader(`{"action":"volume_set","volume":25}`))
+	inactiveVolume.Header.Set("Content-Type", "application/json")
+	inactiveVolumeResponse, err := server.Client().Do(inactiveVolume)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inactiveVolumeResponse.Body.Close()
+	if inactiveVolumeResponse.StatusCode != http.StatusConflict {
+		t.Fatalf("inactive player volume returned %d", inactiveVolumeResponse.StatusCode)
 	}
 }

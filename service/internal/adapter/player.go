@@ -24,6 +24,11 @@ import (
 
 const radioStationsPath = "/mnt/UDISK/sanyin-config/radio-stations.json"
 
+const (
+	avTransportService      = "urn:schemas-upnp-org:service:AVTransport:1"
+	renderingControlService = "urn:schemas-upnp-org:service:RenderingControl:1"
+)
+
 const discoverKPlayerScript = `
 port="$(netstat -lntp 2>/dev/null | awk '$7 ~ /\/KPlayer$/ { address=$4; sub(/^.*:/, "", address); print address; exit }')"
 case "$port" in ''|*[!0-9]*) printf 'result=not_ready\n' ;; *) printf 'result=ready\nkplayer_port=%s\n' "$port" ;; esac
@@ -31,16 +36,19 @@ case "$port" in ''|*[!0-9]*) printf 'result=not_ready\n' ;; *) printf 'result=re
 
 type playerTransport struct {
 	State           string
+	Volume          *int
 	PositionSeconds int
 	DurationSeconds int
 }
 
 type playerController interface {
 	Status(context.Context) (playerTransport, error)
+	Volume(context.Context) (int, error)
 	SetURI(context.Context, string) error
 	Play(context.Context) error
 	Pause(context.Context) error
 	Stop(context.Context) error
+	SetVolume(context.Context, int) error
 }
 
 type deviceHTTPHostProvider interface {
@@ -52,18 +60,17 @@ type upnpPlayer struct {
 	client *http.Client
 
 	mu             sync.Mutex
-	controlURL     string
+	controlURLs    map[string]string
 	controlExpires time.Time
 }
 
 func newUPnPPlayer(runner ShellRunner) *upnpPlayer {
-	return &upnpPlayer{runner: runner, client: &http.Client{Timeout: 5 * time.Second}}
+	return &upnpPlayer{runner: runner, client: &http.Client{Timeout: 5 * time.Second}, controlURLs: map[string]string{}}
 }
 
-func (p *upnpPlayer) endpoint(ctx context.Context) (string, error) {
+func (p *upnpPlayer) endpoint(ctx context.Context, serviceType string) (string, error) {
 	p.mu.Lock()
-	if p.controlURL != "" && time.Now().Before(p.controlExpires) {
-		endpoint := p.controlURL
+	if endpoint := p.controlURLs[serviceType]; endpoint != "" && time.Now().Before(p.controlExpires) {
 		p.mu.Unlock()
 		return endpoint, nil
 	}
@@ -112,20 +119,23 @@ func (p *upnpPlayer) endpoint(ctx context.Context) (string, error) {
 	if err := xml.NewDecoder(io.LimitReader(response.Body, 256*1024)).Decode(&description); err != nil {
 		return "", fmt.Errorf("decode KPlayer description: %w", err)
 	}
-	controlPath := ""
+	controlURLs := map[string]string{}
 	for _, service := range description.Device.Services {
-		if service.Type == "urn:schemas-upnp-org:service:AVTransport:1" {
-			controlPath = service.ControlURL
-			break
+		if service.Type != avTransportService && service.Type != renderingControlService {
+			continue
 		}
+		parsedPath, err := url.Parse(service.ControlURL)
+		if err != nil || service.ControlURL == "" || !strings.HasPrefix(parsedPath.Path, "/") || parsedPath.IsAbs() || parsedPath.Host != "" {
+			continue
+		}
+		controlURLs[service.Type] = base + parsedPath.EscapedPath()
 	}
-	parsedPath, err := url.Parse(controlPath)
-	if err != nil || controlPath == "" || !strings.HasPrefix(parsedPath.Path, "/") || parsedPath.IsAbs() || parsedPath.Host != "" {
-		return "", errors.New("KPlayer AVTransport control URL is invalid")
+	endpoint := controlURLs[serviceType]
+	if endpoint == "" {
+		return "", fmt.Errorf("%w: KPlayer %s control URL is unavailable", ErrCapabilityNotReady, serviceType)
 	}
-	endpoint := base + parsedPath.EscapedPath()
 	p.mu.Lock()
-	p.controlURL = endpoint
+	p.controlURLs = controlURLs
 	p.controlExpires = time.Now().Add(5 * time.Minute)
 	p.mu.Unlock()
 	return endpoint, nil
@@ -133,17 +143,19 @@ func (p *upnpPlayer) endpoint(ctx context.Context) (string, error) {
 
 func (p *upnpPlayer) invalidateEndpoint() {
 	p.mu.Lock()
-	p.controlURL = ""
+	p.controlURLs = map[string]string{}
 	p.controlExpires = time.Time{}
 	p.mu.Unlock()
 }
 
-func soapEnvelope(action string, arguments map[string]string) ([]byte, error) {
+func soapEnvelope(serviceType, action string, arguments map[string]string) ([]byte, error) {
 	var body bytes.Buffer
 	body.WriteString(`<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:`)
 	body.WriteString(action)
-	body.WriteString(` xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">`)
-	order := []string{"InstanceID", "CurrentURI", "CurrentURIMetaData", "Speed"}
+	body.WriteString(` xmlns:u="`)
+	body.WriteString(serviceType)
+	body.WriteString(`">`)
+	order := []string{"InstanceID", "Channel", "DesiredVolume", "CurrentURI", "CurrentURIMetaData", "Speed"}
 	for _, key := range order {
 		value, ok := arguments[key]
 		if !ok {
@@ -165,12 +177,12 @@ func soapEnvelope(action string, arguments map[string]string) ([]byte, error) {
 	return body.Bytes(), nil
 }
 
-func (p *upnpPlayer) call(ctx context.Context, action string, arguments map[string]string) ([]byte, error) {
-	endpoint, err := p.endpoint(ctx)
+func (p *upnpPlayer) call(ctx context.Context, serviceType, action string, arguments map[string]string) ([]byte, error) {
+	endpoint, err := p.endpoint(ctx, serviceType)
 	if err != nil {
 		return nil, err
 	}
-	payload, err := soapEnvelope(action, arguments)
+	payload, err := soapEnvelope(serviceType, action, arguments)
 	if err != nil {
 		return nil, err
 	}
@@ -179,7 +191,7 @@ func (p *upnpPlayer) call(ctx context.Context, action string, arguments map[stri
 		return nil, err
 	}
 	request.Header.Set("Content-Type", `text/xml; charset="utf-8"`)
-	request.Header.Set("SOAPACTION", `"urn:schemas-upnp-org:service:AVTransport:1#`+action+`"`)
+	request.Header.Set("SOAPACTION", `"`+serviceType+`#`+action+`"`)
 	response, err := p.client.Do(request)
 	if err != nil {
 		p.invalidateEndpoint()
@@ -250,36 +262,63 @@ func normalizeTransport(value string) string {
 }
 
 func (p *upnpPlayer) Status(ctx context.Context) (playerTransport, error) {
-	transportBody, err := p.call(ctx, "GetTransportInfo", map[string]string{"InstanceID": "0"})
+	transportBody, err := p.call(ctx, avTransportService, "GetTransportInfo", map[string]string{"InstanceID": "0"})
 	if err != nil {
 		return playerTransport{}, err
 	}
 	result := playerTransport{State: normalizeTransport(xmlText(transportBody, "CurrentTransportState"))}
-	positionBody, positionErr := p.call(ctx, "GetPositionInfo", map[string]string{"InstanceID": "0"})
+	positionBody, positionErr := p.call(ctx, avTransportService, "GetPositionInfo", map[string]string{"InstanceID": "0"})
 	if positionErr == nil {
 		result.PositionSeconds = parseUPnPDuration(xmlText(positionBody, "RelTime"))
 		result.DurationSeconds = parseUPnPDuration(xmlText(positionBody, "TrackDuration"))
 	}
+	if volume, volumeErr := p.Volume(ctx); volumeErr == nil {
+		result.Volume = &volume
+	}
 	return result, nil
 }
 
+func (p *upnpPlayer) Volume(ctx context.Context) (int, error) {
+	volumeBody, err := p.call(ctx, renderingControlService, "GetVolume", map[string]string{"InstanceID": "0", "Channel": "Master"})
+	if err != nil {
+		return 0, err
+	}
+	volume, err := strconv.Atoi(xmlText(volumeBody, "CurrentVolume"))
+	if err != nil || volume < 0 || volume > 100 {
+		return 0, errors.New("KPlayer returned invalid volume")
+	}
+	return volume, nil
+}
+
 func (p *upnpPlayer) SetURI(ctx context.Context, mediaURL string) error {
-	_, err := p.call(ctx, "SetAVTransportURI", map[string]string{"InstanceID": "0", "CurrentURI": mediaURL, "CurrentURIMetaData": ""})
+	_, err := p.call(ctx, avTransportService, "SetAVTransportURI", map[string]string{"InstanceID": "0", "CurrentURI": mediaURL, "CurrentURIMetaData": ""})
 	return err
 }
 
 func (p *upnpPlayer) Play(ctx context.Context) error {
-	_, err := p.call(ctx, "Play", map[string]string{"InstanceID": "0", "Speed": "1"})
+	_, err := p.call(ctx, avTransportService, "Play", map[string]string{"InstanceID": "0", "Speed": "1"})
 	return err
 }
 
 func (p *upnpPlayer) Pause(ctx context.Context) error {
-	_, err := p.call(ctx, "Pause", map[string]string{"InstanceID": "0"})
+	_, err := p.call(ctx, avTransportService, "Pause", map[string]string{"InstanceID": "0"})
 	return err
 }
 
 func (p *upnpPlayer) Stop(ctx context.Context) error {
-	_, err := p.call(ctx, "Stop", map[string]string{"InstanceID": "0"})
+	_, err := p.call(ctx, avTransportService, "Stop", map[string]string{"InstanceID": "0"})
+	return err
+}
+
+func (p *upnpPlayer) SetVolume(ctx context.Context, volume int) error {
+	if volume < 0 || volume > 100 {
+		return ErrInvalidInput
+	}
+	_, err := p.call(ctx, renderingControlService, "SetVolume", map[string]string{
+		"InstanceID":    "0",
+		"Channel":       "Master",
+		"DesiredVolume": strconv.Itoa(volume),
+	})
 	return err
 }
 
@@ -457,8 +496,14 @@ func (m *playbackManager) domainPlayer(observedAt time.Time) domain.Player {
 		}
 		stopTimer = domain.StopTimer{Active: true, StopAt: &stopAt, RemainingSeconds: remaining}
 	}
+	volume := state("unknown")
+	volume.Freshness = domain.UnknownFreshness
+	if m.last.Volume != nil {
+		volume = state(*m.last.Volume)
+	}
 	return domain.Player{
 		Transport:       state(m.last.State),
+		Volume:          volume,
 		PositionSeconds: state(m.last.PositionSeconds),
 		DurationSeconds: state(m.last.DurationSeconds),
 		Current:         current,
@@ -560,6 +605,43 @@ func (m *playbackManager) waitForTimeout(ctx context.Context, expected string, t
 
 func (m *playbackManager) waitFor(ctx context.Context, expected string) error {
 	return m.waitForTimeout(ctx, expected, 4*time.Second)
+}
+
+func (m *playbackManager) setAndWaitForVolume(ctx context.Context, expected int) error {
+	deadline := time.Now().Add(4 * time.Second)
+	nextWrite := time.Time{}
+	var lastErr error
+	for {
+		now := time.Now()
+		if nextWrite.IsZero() || !now.Before(nextWrite) {
+			if err := m.controller.SetVolume(ctx, expected); err != nil {
+				lastErr = err
+			}
+			nextWrite = now.Add(750 * time.Millisecond)
+		}
+		volume, err := m.controller.Volume(ctx)
+		if err == nil {
+			m.mu.Lock()
+			m.last.Volume = &volume
+			m.mu.Unlock()
+			if volume == expected {
+				return nil
+			}
+		} else {
+			lastErr = err
+		}
+		if time.Now().After(deadline) {
+			if lastErr != nil {
+				return fmt.Errorf("KPlayer volume verification timeout: %w", lastErr)
+			}
+			return errors.New("KPlayer volume verification timeout")
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(150 * time.Millisecond):
+		}
+	}
 }
 
 func (m *playbackManager) playIndex(ctx context.Context, index int) error {
@@ -704,6 +786,23 @@ func (m *playbackManager) control(ctx context.Context, command domain.PlayerComm
 		if !isRadio {
 			m.startMonitor()
 		}
+	case "volume_set":
+		if command.Volume == nil || *command.Volume < 0 || *command.Volume > 100 {
+			return domain.Player{}, ErrInvalidInput
+		}
+		current, err := m.status(ctx)
+		if err != nil {
+			return domain.Player{}, err
+		}
+		if current.Transport.Value != "playing" {
+			return domain.Player{}, ErrPlaybackInactive
+		}
+		if err := m.setAndWaitForVolume(ctx, *command.Volume); err != nil {
+			return domain.Player{}, err
+		}
+		// GetVolume 已独立验证写入结果。直接返回缓存的播放状态，避免
+		// KPlayer 在暂停/恢复切换后短暂拒绝 GetTransportInfo 导致误报失败。
+		return m.domainPlayer(m.now().Truncate(time.Second)), nil
 	case "stop":
 		m.mu.Lock()
 		m.cancelStopTimerLocked()

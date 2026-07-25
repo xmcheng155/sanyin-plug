@@ -12,6 +12,7 @@ var ErrCapabilityNotReady = errors.New("capability is not ready")
 var ErrInvalidInput = errors.New("invalid input")
 var ErrNotFound = errors.New("not found")
 var ErrConflict = errors.New("conflict")
+var ErrPlaybackInactive = errors.New("local playback is not active")
 
 // DeviceAdapter is the stable boundary for the future device-backed adapter.
 // No HTTP handler may reach D-Bus, vendor storage, or system commands directly.

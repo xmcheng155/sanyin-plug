@@ -221,6 +221,7 @@ func (m *MockAdapter) Schedules(_ context.Context) (domain.Schedules, error) {
 func (m *MockAdapter) Player(_ context.Context) (domain.Player, error) {
 	return domain.Player{
 		Transport:       m.state("stopped"),
+		Volume:          m.state(40),
 		PositionSeconds: m.state(0),
 		DurationSeconds: m.state(214),
 		Current:         nil,

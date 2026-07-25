@@ -42,6 +42,7 @@
 - 接入原厂 KPlayer 的 UPnP AVTransport；
 - 支持音箱直接拉取 HTTP/HTTPS 音频 URL；
 - 支持播放、暂停、恢复、停止和下一首；
+- 支持通过 KPlayer `RenderingControl` 在 0–100 范围内调节本地播放音量，并以 `GetVolume` 回读验收；
 - 支持设备端播放队列和普通曲目自动续播；
 - 支持收藏、播放、入队和删除网络电台；
 - 电台收藏写入自有配置，服务重启后保留；

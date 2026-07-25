@@ -153,6 +153,7 @@ type StopTimer struct {
 
 type Player struct {
 	Transport       State          `json:"transport"`
+	Volume          State          `json:"volume"`
 	PositionSeconds State          `json:"positionSeconds"`
 	DurationSeconds State          `json:"durationSeconds"`
 	Current         *MediaItem     `json:"current"`
@@ -168,6 +169,7 @@ type PlayerCommand struct {
 	Title           string
 	URL             string
 	DurationMinutes int
+	Volume          *int
 }
 
 type Event struct {

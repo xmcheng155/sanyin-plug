@@ -213,6 +213,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Title           string  `json:"title"`
 			URL             string  `json:"url"`
 			DurationMinutes int     `json:"durationMinutes"`
+			Volume          *int    `json:"volume"`
 		}
 		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192))
 		decoder.DisallowUnknownFields()
@@ -224,7 +225,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.writeError(w, http.StatusBadRequest, "invalid_request", "请求只能包含一个 JSON 对象")
 			return
 		}
-		command := domain.PlayerCommand{Action: *input.Action, ItemID: input.ItemID, Title: input.Title, URL: input.URL, DurationMinutes: input.DurationMinutes}
+		command := domain.PlayerCommand{Action: *input.Action, ItemID: input.ItemID, Title: input.Title, URL: input.URL, DurationMinutes: input.DurationMinutes, Volume: input.Volume}
 		if !validPlayerCommand(command) {
 			h.writeError(w, http.StatusBadRequest, "invalid_request", "播放器 action 与参数不匹配")
 			return
@@ -235,13 +236,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.notReady(w)
 			return
 		case errors.Is(err, adapter.ErrInvalidInput):
-			h.writeError(w, http.StatusBadRequest, "invalid_request", "媒体地址必须为有效的 HTTP/HTTPS URL，标题最长 100 个字符；定时停止范围为 1..60 分钟")
+			h.writeError(w, http.StatusBadRequest, "invalid_request", "媒体地址必须为有效的 HTTP/HTTPS URL，标题最长 100 个字符；定时停止范围为 1..60 分钟；本地播放音量范围为 0..100")
 			return
 		case errors.Is(err, adapter.ErrNotFound):
 			h.writeError(w, http.StatusNotFound, "player_item_not_found", "播放项或网络电台不存在")
 			return
 		case errors.Is(err, adapter.ErrConflict):
 			h.writeError(w, http.StatusConflict, "player_conflict", "当前播放项不能在播放中删除，请先停止或切换")
+			return
+		case errors.Is(err, adapter.ErrPlaybackInactive):
+			h.writeError(w, http.StatusConflict, "player_not_active", "调整本地播放音量前请先开始或恢复播放")
 			return
 		case err != nil:
 			h.internalError(w)
@@ -262,15 +266,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func validPlayerCommand(command domain.PlayerCommand) bool {
 	switch command.Action {
 	case "play_url", "queue_add", "radio_add":
-		return command.URL != "" && command.ItemID == "" && command.DurationMinutes == 0
+		return command.URL != "" && command.ItemID == "" && command.DurationMinutes == 0 && command.Volume == nil
 	case "pause", "resume", "stop", "next", "queue_clear":
-		return command.ItemID == "" && command.Title == "" && command.URL == "" && command.DurationMinutes == 0
+		return command.ItemID == "" && command.Title == "" && command.URL == "" && command.DurationMinutes == 0 && command.Volume == nil
 	case "queue_play", "queue_remove", "radio_remove", "radio_play", "radio_queue":
-		return command.ItemID != "" && command.Title == "" && command.URL == "" && command.DurationMinutes == 0
+		return command.ItemID != "" && command.Title == "" && command.URL == "" && command.DurationMinutes == 0 && command.Volume == nil
 	case "timer_set":
-		return command.ItemID == "" && command.Title == "" && command.URL == "" && command.DurationMinutes >= 1 && command.DurationMinutes <= 60
+		return command.ItemID == "" && command.Title == "" && command.URL == "" && command.DurationMinutes >= 1 && command.DurationMinutes <= 60 && command.Volume == nil
 	case "timer_cancel":
-		return command.ItemID == "" && command.Title == "" && command.URL == "" && command.DurationMinutes == 0
+		return command.ItemID == "" && command.Title == "" && command.URL == "" && command.DurationMinutes == 0 && command.Volume == nil
+	case "volume_set":
+		return command.ItemID == "" && command.Title == "" && command.URL == "" && command.DurationMinutes == 0 && command.Volume != nil && *command.Volume >= 0 && *command.Volume <= 100
 	default:
 		return false
 	}

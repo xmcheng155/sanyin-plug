@@ -137,6 +137,16 @@ function bindEvents() {
 			event.preventDefault();
 			submitStopTimer(event.target);
 		}
+		if (event.target.id === "player-volume-form") {
+			event.preventDefault();
+			submitPlayerVolume(event.target);
+		}
+	});
+
+	document.addEventListener("input", (event) => {
+		if (event.target.id !== "player-volume-range") return;
+		const output = document.querySelector("#player-volume-value");
+		if (output) output.textContent = `${event.target.value}%`;
 	});
 
   elements.scenario.addEventListener("change", async (event) => {
@@ -384,6 +394,10 @@ function renderPlayer() {
 	const active = transport === "playing" || transport === "paused" || transport === "transitioning";
 	const hasNext = player.currentIndex >= 0 && player.currentIndex + 1 < player.queue.length;
 	const current = player.current;
+	const rawVolume = Number(player.volume?.value);
+	const volumeKnown = Number.isFinite(rawVolume) && rawVolume >= 0 && rawVolume <= 100;
+	const volume = volumeKnown ? Math.round(rawVolume) : 0;
+	const volumeAdjustable = transport === "playing";
 	const stopTimer = player.stopTimer || { active: false, remainingSeconds: 0 };
 	const timerRemaining = Math.max(0, Number(stopTimer.remainingSeconds || 0));
 	const queue = player.queue.length ? player.queue.map((item, index) => {
@@ -411,6 +425,11 @@ function renderPlayer() {
 				<button class="button secondary" data-player-action="stop" type="button" ${capability.disabled || !active ? "disabled" : ""}>停止</button>
 				<button class="button secondary" data-player-action="next" type="button" ${capability.disabled || !hasNext ? "disabled" : ""}>下一首</button>
 			</div>
+			<form id="player-volume-form" class="player-volume">
+				<div class="player-volume-copy"><strong>本地播放音量</strong><span id="player-volume-value">${volumeKnown ? `${volume}%` : "未知"}</span></div>
+				<label class="player-volume-control"><span>0</span><input id="player-volume-range" name="volume" type="range" min="0" max="100" step="1" value="${volume}" ${capability.disabled || !volumeAdjustable || !volumeKnown ? "disabled" : ""}><span>100</span></label>
+				<button class="button" type="submit" ${capability.disabled || !volumeAdjustable || !volumeKnown ? "disabled" : ""}>应用音量</button>
+			</form>
 			<div class="stop-timer">
 				<div class="stop-timer-copy"><strong>定时停止</strong><span>${stopTimer.active ? `剩余 ${formatDuration(timerRemaining)}` : "未设置 · 最长 60 分钟"}</span></div>
 				<form id="stop-timer-form" class="stop-timer-form">
@@ -448,7 +467,7 @@ async function refreshPlayer() {
 	try {
 		const response = await api.player();
 		app.data.player = response.data;
-		if (app.route === "player") renderPage();
+		if (app.route === "player" && document.activeElement?.id !== "player-volume-range") renderPage();
 	} catch (error) {
 		if (app.route === "player") console.warn("播放器状态刷新失败", error);
 	} finally {
@@ -478,6 +497,22 @@ async function submitStopTimer(form) {
 		app.data.player = response.data;
 		renderPage();
 		toast(`已设置 ${durationMinutes} 分钟后停止播放`);
+	} catch (error) {
+		toast(error.message);
+	}
+}
+
+async function submitPlayerVolume(form) {
+	const volume = Number(form.elements.volume.value);
+	if (!Number.isInteger(volume) || volume < 0 || volume > 100) {
+		toast("请输入 0 到 100 的整数音量");
+		return;
+	}
+	try {
+		const response = await api.controlPlayer("volume_set", { volume });
+		app.data.player = response.data;
+		renderPage();
+		toast(`本地播放音量已调整为 ${volume}%`);
 	} catch (error) {
 		toast(error.message);
 	}

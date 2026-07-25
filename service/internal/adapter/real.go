@@ -272,7 +272,7 @@ func (m *RealAdapter) Capabilities(ctx context.Context) ([]domain.Capability, er
 	return []domain.Capability{
 		{ID: "device.info", Readability: domain.ReadFull, Writability: domain.WriteUnsupported, Availability: domain.Available},
 		{ID: "device.health", Readability: domain.ReadFull, Writability: domain.WriteUnsupported, Availability: domain.Available},
-		{ID: "player.localPlayback", Readability: domain.ReadFull, Writability: domain.WriteExperimental, Availability: available("kplayer"), Reason: "URL 播放与原厂音频链路已实机验收；暂停、恢复、队列、电台及异常路径由本地服务管理并保持实验标识"},
+		{ID: "player.localPlayback", Readability: domain.ReadFull, Writability: domain.WriteExperimental, Availability: available("kplayer"), Reason: "URL 播放、RenderingControl 音量及原厂音频链路已实机验收；暂停、恢复、队列、电台及异常路径由本地服务管理并保持实验标识"},
 		{ID: "airplay.runtime", Readability: domain.ReadFull, Writability: domain.WriteUnsupported, Availability: available("splayer")},
 		{ID: "airplay.recover", Readability: domain.ReadFull, Writability: domain.WriteSafe, Availability: available("splayer"), Reason: "原生启动命令、端口验收、幂等与重启恢复已通过实机验证"},
 		autoRecoverCapability(snapshot),

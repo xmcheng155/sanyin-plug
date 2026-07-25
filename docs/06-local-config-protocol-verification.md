@@ -306,6 +306,8 @@ DWARF 常量给出了完整的业务编号：
 
 同日完成设备端定时停止验收：播放江苏交通广播 FM101.1 后设置 1 分钟定时，API 倒计时依次回读为 48、32、17、2 秒，到时自动调用 KPlayer Stop，最终回读 `transport=stopped`、`stopTimer.active=false`。60 分钟上限可设置，61 分钟返回 HTTP 400；设置 60 分钟后重启配置服务，定时状态被清除且 15 个电台收藏保持不变。
 
+同日完成 KPlayer 本地播放音量动态回放：设备描述中的 `RenderingControl:1` 明确提供 `GetVolume`、`SetVolume`，通道只允许 `Master`，范围为 `0..100`、步长 1。播放器停止时调用 `SetVolume(95)` 虽返回 SOAP 成功，但控制中心记录 `cur player is not dlna` 且 `GetVolume` 不变化；后续复测还确认暂停状态下 `SetVolume(28)` 返回 SOAP 200，但 `GetVolume` 仍保持 30。因此 API 只在 `playing` 状态开放调音量，暂停和停止时均拒绝。播放江苏交通广播 FM101.1 时，初始 `commonStatus.volPer=30`、硬件档位 `6/20`；调用 `SetVolume(25)` 后，控制中心收到 `CMD_KPLAYER_CTR_SET_VOLUME=0x1c08`，`ProjectorVolProcess` 将档位改为 `5/20`，广播 `volPer=25`，KPlayer `GetVolume` 同步回读 25。随后恢复为 30 并停止播放。该路径达到 **S3 独立回放**，实现必须只在 playing 状态开放，并以 `GetVolume` 一致作为成功条件。
+
 升为 `safe` 前仍需补齐：
 
 - `Seek` 的动态验收；
@@ -336,7 +338,7 @@ DWARF 常量给出了完整的业务编号：
 | Wi-Fi 列表 | `0x0b3b` / `0x0b3c` | S1 | 确认扫描对当前连接的影响和完整脱敏 |
 | Wi-Fi 配网 | `0x0b00` / `0x0b01` | S1 | 取得 USB 恢复和自动回滚方案后测试 |
 | KPlayer URL 播放 | UPnP `AVTransport`：`SetAVTransportURI`、`Play`、`Pause`、`Stop`、状态与进度查询；自有后台队列与电台持久化 | S3，已开放实验 API | 补 Seek、异常媒体/断网与音源抢占测试 |
-| KPlayer 音量/静音 | `0x1c08` / `0x1c09` | S1 | 播放状态下动态抓包 |
+| KPlayer 音量/静音 | RenderingControl `GetVolume`/`SetVolume` → `0x1c08`；静音候选 `0x1c09` | 音量 S3，0..100 写入回读已验收；静音 S1 | 音量补 0/100 边界和抢占测试；静音保持禁用 |
 | AirPlay 启停 | `0x1d01` / `0x1d02` | 启动 S4，关闭 S1 | 补关闭后的回滚与守护协调测试 |
 | AirPlay 音量事件 | `0x1e05`，已观察 `{"volume":27}` | S2 日志观察 | 补完整 D-Bus 抓包并验证 0%、100% 和播放结束恢复 |
 | 音效/EQ | `GET /eq/:mode`，`mode=0..6`；状态广播 `0x0a0a` | 选中态/云端持久性 S3；本地播放中 Normal/Vocal 硬件切换 S3 | 补离线、服务异常、切歌和超时回滚；模式 3..6 不再逐项回放 |
@@ -359,7 +361,7 @@ DWARF 常量给出了完整的业务编号：
 
 ## 10. 下一步
 
-1. KPlayer 本地播放 API、暂停、恢复、停止、连续队列和网络电台正常路径已完成；下一步补 Seek、异常 URL/断网和 AirPlay/蓝牙抢占测试。
+1. KPlayer 本地播放 API、音量回读调节、暂停、恢复、停止、连续队列和网络电台正常路径已完成；下一步补 Seek、音量 0/100 边界、异常 URL/断网和 AirPlay/蓝牙抢占测试。
 2. 验证蓝牙已连接设备时关闭、服务异常和重启后的行为，并建立无副作用状态读取。
 3. 找到业务层音量入口，验证写入后 `commonStatus`、硬件档位和重启状态一致。
 4. 音效/EQ 已借助语音随机播放完成 `set_now=true` 和 Normal/Vocal 硬件切换；模式 3..6 接受共用代码路径和静态映射，不再逐项回放。后续只补切歌重选、离线报告失败、控制中心异常和超时回滚，完成前保持 S3。

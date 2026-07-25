@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -76,17 +77,76 @@ func TestUPnPPlayerDiscoversAVTransportAndEscapesMediaURL(t *testing.T) {
 	}
 }
 
+func TestUPnPPlayerUsesRenderingControlForVolume(t *testing.T) {
+	volume := 30
+	actions := []string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			fmt.Fprint(w, `<?xml version="1.0"?><root><device><serviceList><service><serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType><controlURL>/av/control.xml</controlURL></service><service><serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType><controlURL>/render/control.xml</controlURL></service></serviceList></device></root>`)
+			return
+		}
+		action := strings.Trim(r.Header.Get("SOAPACTION"), `"`)
+		actions = append(actions, action)
+		payload, _ := io.ReadAll(r.Body)
+		switch {
+		case strings.HasSuffix(action, "#SetVolume"):
+			value, _ := strconv.Atoi(xmlText(payload, "DesiredVolume"))
+			volume = value
+		case strings.HasSuffix(action, "#GetVolume"):
+			fmt.Fprintf(w, `<CurrentVolume>%d</CurrentVolume>`, volume)
+		case strings.HasSuffix(action, "#GetTransportInfo"):
+			fmt.Fprint(w, `<CurrentTransportState>PLAYING</CurrentTransportState>`)
+		case strings.HasSuffix(action, "#GetPositionInfo"):
+			fmt.Fprint(w, `<TrackDuration>00:01:00</TrackDuration><RelTime>00:00:10</RelTime>`)
+		default:
+			fmt.Fprint(w, `<ok/>`)
+		}
+	}))
+	defer server.Close()
+	parsed, _ := url.Parse(server.URL)
+	port, _ := strconv.Atoi(parsed.Port())
+	player := newUPnPPlayer(kplayerDiscoveryRunner{port: port})
+
+	if err := player.SetVolume(context.Background(), 25); err != nil {
+		t.Fatal(err)
+	}
+	status, err := player.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Volume == nil || *status.Volume != 25 {
+		t.Fatalf("RenderingControl volume was not read back: %#v", status)
+	}
+	if len(actions) < 2 || !strings.Contains(actions[0], "RenderingControl:1#SetVolume") || !strings.Contains(actions[len(actions)-1], "RenderingControl:1#GetVolume") {
+		t.Fatalf("unexpected RenderingControl actions: %#v", actions)
+	}
+}
+
 type fakePlayerController struct {
-	mu     sync.Mutex
-	state  playerTransport
-	uri    string
-	played []string
+	mu                    sync.Mutex
+	state                 playerTransport
+	uri                   string
+	played                []string
+	volumeSet             bool
+	failStatusAfterVolume bool
 }
 
 func (f *fakePlayerController) Status(_ context.Context) (playerTransport, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.volumeSet && f.failStatusAfterVolume {
+		return playerTransport{}, errors.New("transient GetTransportInfo failure")
+	}
 	return f.state, nil
+}
+
+func (f *fakePlayerController) Volume(_ context.Context) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.state.Volume == nil {
+		return 0, errors.New("volume unavailable")
+	}
+	return *f.state.Volume, nil
 }
 
 func (f *fakePlayerController) SetURI(_ context.Context, value string) error {
@@ -114,6 +174,14 @@ func (f *fakePlayerController) Pause(_ context.Context) error {
 func (f *fakePlayerController) Stop(_ context.Context) error {
 	f.mu.Lock()
 	f.state.State = "stopped"
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakePlayerController) SetVolume(_ context.Context, volume int) error {
+	f.mu.Lock()
+	f.state.Volume = &volume
+	f.volumeSet = true
 	f.mu.Unlock()
 	return nil
 }
@@ -161,6 +229,29 @@ func TestPlaybackManagerControlsQueueAndRedactsSources(t *testing.T) {
 	}
 	if player, err = manager.control(ctx, domain.PlayerCommand{Action: "stop"}); err != nil || player.Transport.Value != "stopped" {
 		t.Fatalf("stop failed: %#v %v", player, err)
+	}
+}
+
+func TestPlaybackManagerSetsVolumeOnlyDuringLocalPlayback(t *testing.T) {
+	initialVolume := 30
+	controller := &fakePlayerController{
+		state:                 playerTransport{State: "paused", Volume: &initialVolume},
+		failStatusAfterVolume: true,
+	}
+	manager := newPlaybackManager(controller, kplayerDiscoveryRunner{}, time.Now)
+	requestedVolume := 25
+	if _, err := manager.control(context.Background(), domain.PlayerCommand{Action: "volume_set", Volume: &requestedVolume}); !errors.Is(err, ErrPlaybackInactive) {
+		t.Fatalf("paused player accepted volume change: %v", err)
+	}
+	controller.setState("playing")
+	player, err := manager.control(context.Background(), domain.PlayerCommand{Action: "volume_set", Volume: &requestedVolume})
+	if err != nil || player.Volume.Value != 25 {
+		t.Fatalf("volume was not set and read back: %#v %v", player, err)
+	}
+	controller.failStatusAfterVolume = false
+	controller.setState("stopped")
+	if _, err := manager.control(context.Background(), domain.PlayerCommand{Action: "volume_set", Volume: &requestedVolume}); !errors.Is(err, ErrPlaybackInactive) {
+		t.Fatalf("inactive player accepted volume change: %v", err)
 	}
 }
 
