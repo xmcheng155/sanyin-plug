@@ -306,6 +306,8 @@ DWARF 常量给出了完整的业务编号：
 
 同日完成设备端定时停止验收：播放江苏交通广播 FM101.1 后设置 1 分钟定时，API 倒计时依次回读为 48、32、17、2 秒，到时自动调用 KPlayer Stop，最终回读 `transport=stopped`、`stopTimer.active=false`。60 分钟上限可设置，61 分钟返回 HTTP 400；设置 60 分钟后重启配置服务，定时状态被清除且 15 个电台收藏保持不变。
 
+后续补齐服务重启后的当前媒体识别与电台排序验收：KPlayer `GetPositionInfo.TrackURI` 在直播场景为空，但 `GetMediaInfo.CurrentURI` 仍返回 `http://lzlive.vojs.cn/4TaHTeL/92/live.m3u8?`。服务去除无意义查询标记后匹配已收藏电台，队列为空时仍正确返回“江苏交通广播 FM101.1”。播放未中断时将该电台从索引 14 上移到 13，再下移恢复到 14，两次 API 均返回 200，`transport` 持续为 `playing`；设备配置文件复读为 15 项且最终顺序恢复一致。
+
 同日完成 KPlayer 本地播放音量动态回放：设备描述中的 `RenderingControl:1` 明确提供 `GetVolume`、`SetVolume`，通道只允许 `Master`，范围为 `0..100`、步长 1。播放器停止时调用 `SetVolume(95)` 虽返回 SOAP 成功，但控制中心记录 `cur player is not dlna` 且 `GetVolume` 不变化；后续复测还确认暂停状态下 `SetVolume(28)` 返回 SOAP 200，但 `GetVolume` 仍保持 30。因此 API 只在 `playing` 状态开放调音量，暂停和停止时均拒绝。播放江苏交通广播 FM101.1 时，初始 `commonStatus.volPer=30`、硬件档位 `6/20`；调用 `SetVolume(25)` 后，控制中心收到 `CMD_KPLAYER_CTR_SET_VOLUME=0x1c08`，`ProjectorVolProcess` 将档位改为 `5/20`，广播 `volPer=25`，KPlayer `GetVolume` 同步回读 25。随后恢复为 30 并停止播放。该路径达到 **S3 独立回放**，实现必须只在 playing 状态开放，并以 `GetVolume` 一致作为成功条件。
 
 升为 `safe` 前仍需补齐：

@@ -78,7 +78,7 @@ AirPlay 的启动命令已验证：向 `netease.ihw.splayer` 的 `/netease/ihw/s
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `device.info` | 主机名、固件、服务版本 | 系统文件、进程 | 是 | 不适用 | 否 | 否 | `GET /device` |
 | `device.health` | AirPlay/KPlayer/控制中心/闹钟服务及端口状态 | 进程、端口、D-Bus owner | 是 | 不适用 | 否 | 否 | `GET /status` |
-| `player.localPlayback` | HTTP/HTTPS 音频 URL、0..100 播放音量、队列、网络电台及最长 60 分钟定时停止 | KPlayer UPnP AVTransport + RenderingControl + 自有后台队列与内存定时器管理；电台写入自有配置 | 是，含传输状态、音量、进度与倒计时 | **实验性：正常控制、音量写入回读、手动/自动续播、电台持久化和定时停止已验收** | 是：异常格式、断网、AirPlay/蓝牙抢占和断电窗口仍需覆盖 | 否 | `GET /player`；`POST /player/control` |
+| `player.localPlayback` | HTTP/HTTPS 音频 URL、0..100 播放音量、队列、可排序网络电台及最长 60 分钟定时停止 | KPlayer UPnP AVTransport + RenderingControl + 自有后台队列与内存定时器管理；电台及顺序写入自有配置 | 是，含传输状态、当前 URI、音量、进度与倒计时 | **实验性：正常控制、当前媒体恢复、音量写入回读、手动/自动续播、电台排序持久化和定时停止已验收** | 是：异常格式、断网、AirPlay/蓝牙抢占和断电窗口仍需覆盖 | 否 | `GET /player`；`POST /player/control` |
 | `airplay.runtime` | `SPlayer` 运行，5002 监听 | 进程、端口、D-Bus | 是 | 不适用 | 否 | 否 | `GET /airplay` |
 | `airplay.recover` | 恢复 AirPlay 监听 | 已验证的 `SPlayer` D-Bus 启动命令 | 是 | **是，仅恢复/启用** | 否 | 否 | `POST /airplay/recover` |
 | `airplay.enabled` | 厂商快照为 `airPlayPrivilege=0`，运行态由守护服务维持可用 | 厂商库 + D-Bus | 是 | 否 | 是：关闭、持久策略与守护协调 | 否 | 暂不开放普通开关 |

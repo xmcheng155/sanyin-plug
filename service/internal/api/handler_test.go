@@ -576,7 +576,17 @@ func TestRealModeControlsKPlayerThroughValidatedPlayerAPI(t *testing.T) {
 		return body["data"].(map[string]any)
 	}
 
-	player := control(`{"action":"play_url","title":"测试音乐","url":"http://media.example/test.mp3?token=private"}`)
+	player := control(`{"action":"radio_add","title":"A 电台","url":"http://radio.example/a.mp3"}`)
+	player = control(`{"action":"radio_add","title":"B 电台","url":"http://radio.example/b.mp3"}`)
+	stations := player["stations"].([]any)
+	secondStationID := stations[1].(map[string]any)["id"].(string)
+	player = control(fmt.Sprintf(`{"action":"radio_move_up","itemId":%q}`, secondStationID))
+	stations = player["stations"].([]any)
+	if stations[0].(map[string]any)["name"] != "B 电台" {
+		t.Fatalf("radio station order was not changed: %#v", stations)
+	}
+
+	player = control(`{"action":"play_url","title":"测试音乐","url":"http://media.example/test.mp3?token=private"}`)
 	if player["transport"].(map[string]any)["value"] != "playing" || player["positionSeconds"].(map[string]any)["value"] != float64(2) {
 		t.Fatalf("KPlayer play was not verified: %#v", player)
 	}
@@ -597,10 +607,10 @@ func TestRealModeControlsKPlayerThroughValidatedPlayerAPI(t *testing.T) {
 	if player["stopTimer"].(map[string]any)["active"] != false {
 		t.Fatalf("stop timer was not cancelled: %#v", player["stopTimer"])
 	}
-	for action, expected := range map[string]string{"pause": "paused", "resume": "playing", "stop": "stopped"} {
-		player = control(fmt.Sprintf(`{"action":%q}`, action))
-		if player["transport"].(map[string]any)["value"] != expected {
-			t.Fatalf("%s was not verified: %#v", action, player)
+	for _, step := range []struct{ action, expected string }{{"pause", "paused"}, {"resume", "playing"}, {"stop", "stopped"}} {
+		player = control(fmt.Sprintf(`{"action":%q}`, step.action))
+		if player["transport"].(map[string]any)["value"] != step.expected {
+			t.Fatalf("%s was not verified: %#v", step.action, player)
 		}
 	}
 

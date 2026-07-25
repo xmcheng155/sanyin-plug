@@ -107,6 +107,12 @@ test("Mock 环境标识在初始页面中始终可见", async () => {
   assert.match(html, /不会连接或修改音箱/);
 });
 
+test("真实设备环境不显示额外提示横幅", async () => {
+	const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
+	assert.match(source, /elements\.banner\.hidden = real/);
+	assert.doesNotMatch(source, /<strong>真实设备环境<\/strong>/);
+});
+
 test("总览使用本地设备实拍并标注原始来源", async () => {
   const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
   const photo = await readFile(new URL("../assets/sanyin-speaker-red.jpg", import.meta.url));
@@ -214,6 +220,8 @@ test("网页提供本地 URL 播放、完整控制、队列和网络电台", asy
 	assert.match(appSource, /播放队列/);
 	assert.match(appSource, /网络电台/);
 	assert.match(appSource, /id="radio-station-form"/);
+	assert.match(appSource, /data-player-action="radio_move_up"/);
+	assert.match(appSource, /data-player-action="radio_move_down"/);
 	assert.match(appSource, /id="stop-timer-form"/);
 	assert.match(appSource, /data-player-action="timer_cancel"/);
 	assert.match(appSource, /最长 60 分钟/);

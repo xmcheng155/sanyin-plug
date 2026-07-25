@@ -103,11 +103,11 @@ EQ 的 `selectedMode`、`appliedMode`、`applyState` 必须分别保留。`pendi
 - `PATCH /bluetooth`：请求体为 `{"enabled": true|false}`，等待 `0x0b2f`（开启）或 `0x0b30`（关闭）成功事件；当前开关仍缺无副作用查询，因此只把最近验收结果作为 `derived/stale` 单独返回；
 - `PATCH /audio/effect`：请求体为 `{"mode": 0..6}`，只调用音箱 loopback 的固定 EQ 路由，等待 `commonStatus.eqType` 对应事件；`selectedMode` 和基于固件文件回读的 `appliedMode` 必须分开返回；
 - `POST /network/switch`：请求体为 `{"ssid":"...","password":"..."}`；开放网络使用空密码。事务先备份当前配置，45 秒内未同时验收目标 SSID、`COMPLETED`、IPv4、默认路由和网关可达时自动恢复原配置，并再次等待原网络联网。服务启动时也会恢复带有未完成标记的事务。
-- `POST /player/control`：统一接收 `action`。`play_url` 直接播放 URL；`pause`、`resume`、`stop`、`next` 控制传输；`volume_set` 携带整数 `volume=0..100`，只在 KPlayer 播放中通过 RenderingControl 设置并以 `GetVolume` 回读验收，暂停或停止时拒绝；`queue_add`、`queue_play`、`queue_remove`、`queue_clear` 管理队列；`radio_add`、`radio_remove`、`radio_play`、`radio_queue` 管理网络电台；`timer_set` 携带整数 `durationMinutes=1..60`，`timer_cancel` 取消。媒体只接受 HTTP/HTTPS，播放状态和进度必须由原厂 KPlayer UPnP AVTransport 回读；普通曲目自然结束后由设备端后台监视器自动续播下一项。
+- `POST /player/control`：统一接收 `action`。`play_url` 直接播放 URL；`pause`、`resume`、`stop`、`next` 控制传输；`volume_set` 携带整数 `volume=0..100`，只在 KPlayer 播放中通过 RenderingControl 设置并以 `GetVolume` 回读验收，暂停或停止时拒绝；`queue_add`、`queue_play`、`queue_remove`、`queue_clear` 管理队列；`radio_add`、`radio_remove`、`radio_play`、`radio_queue` 管理网络电台，`radio_move_up`、`radio_move_down` 携带 `itemId` 调整收藏顺序；`timer_set` 携带整数 `durationMinutes=1..60`，`timer_cancel` 取消。媒体只接受 HTTP/HTTPS，播放状态、当前 URI 和进度必须由原厂 KPlayer UPnP AVTransport 回读；普通曲目自然结束后由设备端后台监视器自动续播下一项。
 
 蓝牙、EQ、Wi-Fi 和本地播放标记为 `experimental`：表示正常路径已有设备验收，Wi-Fi 也完成了超时回退和启动恢复验收；本地播放已验证 URL 播放、暂停、恢复、停止、0..100 音量写入回读、进度、手动/自动切歌、队列及电台的正常路径。新网络覆盖面、断电窗口、异常媒体格式、播放网络中断，以及本地播放与 AirPlay/蓝牙抢占等场景仍未全部达到 S4，不得显示为 `safe`。仅应添加可信 URL；服务不会替用户代理、缓存或扫描远端内容。
 
-网络电台保存到 `/mnt/UDISK/sanyin-config/radio-stations.json`，以 `0600` 权限原子写入并在服务重启后恢复；播放队列与当前项仅保存在内存中，服务重启后清空。直播 MP3 首次缓冲最多等待 12 秒；原厂 KPlayer 对无限流会回报伪时长和伪停止状态，服务在已确认进入播放后将电台进度归一化为 `0/0`，并在用户主动暂停或停止前维持相应的直播传输状态。
+网络电台及排列顺序保存到 `/mnt/UDISK/sanyin-config/radio-stations.json`，以 `0600` 权限原子写入并在服务重启后恢复；播放队列仅保存在内存中，服务重启后清空，但正在播放的媒体会通过 KPlayer `GetMediaInfo.CurrentURI` 回读，并优先匹配收藏电台名称。直播 MP3 首次缓冲最多等待 12 秒；原厂 KPlayer 对无限流会回报伪时长和伪停止状态，服务在已确认进入播放后将电台进度归一化为 `0/0`，并在用户主动暂停或停止前维持相应的直播传输状态。
 
 定时停止由音箱端服务执行，不依赖浏览器保持打开。`GET /player` 的 `stopTimer` 返回 `active`、`stopAt` 和 `remainingSeconds`；手动 `stop` 或 `queue_clear` 会取消定时，换歌和切换电台不会取消。定时器只保存在内存中，服务重启后清除，避免过期任务在重启后误停。
 

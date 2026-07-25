@@ -80,8 +80,7 @@ h1 { margin: 0; font-size: clamp(27px, 3vw, 38px); line-height: 1.12; letter-spa
 .environment-banner strong, .environment-banner small { display: block; }
 .environment-banner strong { font-size: 13px; }
 .environment-banner small { margin-top: 2px; font-size: 11px; opacity: .8; }
-.environment-banner.environment-real { border-color: #b9d9c8; background: var(--green-soft); color: #276444; }
-.environment-banner.environment-real .banner-icon { background: var(--green); }
+.environment-banner[hidden] { display: none !important; }
 .scenario-control[hidden] { display: none !important; }
 .page-content { max-width: 1260px; margin: 0 auto; }
 
@@ -199,6 +198,7 @@ h1 { margin: 0; font-size: clamp(27px, 3vw, 38px); line-height: 1.12; letter-spa
 .station-card { display: grid; grid-template-columns: 38px minmax(0, 1fr); gap: 11px; align-items: center; padding: 14px; border: 1px solid var(--line); border-radius: 15px; background: var(--surface-subtle); }
 .station-icon { width: 38px; height: 38px; border-radius: 12px; background: var(--blue-soft); color: var(--blue); display: grid; place-items: center; }
 .station-actions { grid-column: 1 / -1; padding-top: 3px; }
+.station-order-actions { display: inline-flex; gap: 5px; margin-right: auto; }
 
 .service-list { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; }
 .service-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 15px; border: 1px solid var(--line); border-radius: 13px; }

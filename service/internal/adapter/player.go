@@ -37,6 +37,7 @@ case "$port" in ''|*[!0-9]*) printf 'result=not_ready\n' ;; *) printf 'result=re
 type playerTransport struct {
 	State           string
 	Volume          *int
+	CurrentURI      string
 	PositionSeconds int
 	DurationSeconds int
 }
@@ -271,6 +272,13 @@ func (p *upnpPlayer) Status(ctx context.Context) (playerTransport, error) {
 	if positionErr == nil {
 		result.PositionSeconds = parseUPnPDuration(xmlText(positionBody, "RelTime"))
 		result.DurationSeconds = parseUPnPDuration(xmlText(positionBody, "TrackDuration"))
+		result.CurrentURI = xmlText(positionBody, "TrackURI")
+	}
+	if result.CurrentURI == "" {
+		mediaBody, mediaErr := p.call(ctx, avTransportService, "GetMediaInfo", map[string]string{"InstanceID": "0"})
+		if mediaErr == nil {
+			result.CurrentURI = xmlText(mediaBody, "CurrentURI")
+		}
 	}
 	if volume, volumeErr := p.Volume(ctx); volumeErr == nil {
 		result.Volume = &volume
@@ -462,6 +470,27 @@ func publicSource(mediaURL string) string {
 	return parsed.String()
 }
 
+func observedMediaItem(status playerTransport, stations []radioEntry) *domain.MediaItem {
+	if status.State != "playing" && status.State != "paused" && status.State != "transitioning" {
+		return nil
+	}
+	mediaURL, err := validateMediaURL(status.CurrentURI)
+	if err != nil {
+		return nil
+	}
+	source := publicSource(mediaURL)
+	for _, station := range stations {
+		if publicSource(station.URL) == source {
+			return &domain.MediaItem{ID: "observed-" + station.ID, Title: station.Name, Source: source, Kind: "radio"}
+		}
+	}
+	title, err := mediaTitle("", mediaURL)
+	if err != nil {
+		title = "外部媒体"
+	}
+	return &domain.MediaItem{ID: "observed-current", Title: title, Source: source, Kind: "url"}
+}
+
 func (m *playbackManager) nextID(prefix string) string {
 	m.sequence++
 	return fmt.Sprintf("%s-%d-%d", prefix, m.now().UnixMilli(), m.sequence)
@@ -486,6 +515,8 @@ func (m *playbackManager) domainPlayer(observedAt time.Time) domain.Player {
 	if m.currentIndex >= 0 && m.currentIndex < len(queue) {
 		item := queue[m.currentIndex]
 		current = &item
+	} else {
+		current = observedMediaItem(m.last, m.stations)
 	}
 	stopTimer := domain.StopTimer{}
 	if !m.stopAt.IsZero() {
@@ -913,6 +944,36 @@ func (m *playbackManager) control(ctx context.Context, command domain.PlayerComm
 		m.stations = append(m.stations[:index], m.stations[index+1:]...)
 		m.mu.Unlock()
 		if err := m.saveStations(ctx); err != nil {
+			return domain.Player{}, err
+		}
+	case "radio_move_up", "radio_move_down":
+		m.mu.Lock()
+		index := -1
+		for candidate, station := range m.stations {
+			if station.ID == command.ItemID {
+				index = candidate
+				break
+			}
+		}
+		if index < 0 {
+			m.mu.Unlock()
+			return domain.Player{}, ErrNotFound
+		}
+		target := index - 1
+		if command.Action == "radio_move_down" {
+			target = index + 1
+		}
+		if target < 0 || target >= len(m.stations) {
+			m.mu.Unlock()
+			break
+		}
+		previous := append([]radioEntry(nil), m.stations...)
+		m.stations[index], m.stations[target] = m.stations[target], m.stations[index]
+		m.mu.Unlock()
+		if err := m.saveStations(ctx); err != nil {
+			m.mu.Lock()
+			m.stations = previous
+			m.mu.Unlock()
 			return domain.Player{}, err
 		}
 	case "radio_play", "radio_queue":

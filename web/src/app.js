@@ -180,10 +180,8 @@ function renderEnvironment() {
 	elements.scenario.closest(".scenario-control").hidden = real;
 	elements.runtimeModeTitle.textContent = real ? "真实设备" : "本地模式";
 	elements.runtimeModeDetail.textContent = real ? "DeviceAdapter 已连接" : "Mock 服务";
-	elements.banner.classList.toggle("environment-real", real);
-	elements.banner.innerHTML = real
-	  ? `<span class="banner-icon">D</span><span><strong>真实设备环境</strong><small>状态来自当前音箱；可写操作将明确确认并验收结果。</small></span>`
-	  : `<span class="banner-icon">M</span><span><strong>模拟数据环境</strong><small>所有状态和操作均为本机 Mock，不会连接或修改音箱。</small></span>`;
+	elements.banner.hidden = real;
+	if (!real) elements.banner.innerHTML = `<span class="banner-icon">M</span><span><strong>模拟数据环境</strong><small>所有状态和操作均为本机 Mock，不会连接或修改音箱。</small></span>`;
 }
 
 async function loadData() {
@@ -410,9 +408,9 @@ function renderPlayer() {
 			<div class="queue-actions"><button class="button secondary compact" data-player-action="queue_play" data-item-id="${escapeHTML(item.id)}" type="button" ${capability.disabled ? "disabled" : ""}>播放</button><button class="icon-button compact-icon" data-player-action="queue_remove" data-item-id="${escapeHTML(item.id)}" type="button" aria-label="移除 ${escapeHTML(item.title)}" ${removeDisabled ? "disabled" : ""}>×</button></div>
 		</div>`;
 	}).join("") : `<div class="empty-state compact-empty">播放队列为空，可从 URL 或网络电台加入。</div>`;
-	const stations = player.stations.length ? player.stations.map((station) => `<article class="station-card">
+	const stations = player.stations.length ? player.stations.map((station, index) => `<article class="station-card">
 		<span class="station-icon">◉</span><div><strong>${escapeHTML(station.name)}</strong><small>${escapeHTML(station.source)}</small></div>
-		<div class="station-actions"><button class="button compact" data-player-action="radio_play" data-item-id="${escapeHTML(station.id)}" type="button" ${capability.disabled ? "disabled" : ""}>播放</button><button class="button secondary compact" data-player-action="radio_queue" data-item-id="${escapeHTML(station.id)}" type="button" ${capability.disabled ? "disabled" : ""}>加入队列</button><button class="icon-button compact-icon" data-player-action="radio_remove" data-item-id="${escapeHTML(station.id)}" type="button" aria-label="删除 ${escapeHTML(station.name)}" ${capability.disabled ? "disabled" : ""}>×</button></div>
+		<div class="station-actions"><span class="station-order-actions"><button class="icon-button compact-icon" data-player-action="radio_move_up" data-item-id="${escapeHTML(station.id)}" type="button" aria-label="上移 ${escapeHTML(station.name)}" ${capability.disabled || index === 0 ? "disabled" : ""}>↑</button><button class="icon-button compact-icon" data-player-action="radio_move_down" data-item-id="${escapeHTML(station.id)}" type="button" aria-label="下移 ${escapeHTML(station.name)}" ${capability.disabled || index === player.stations.length - 1 ? "disabled" : ""}>↓</button></span><button class="button compact" data-player-action="radio_play" data-item-id="${escapeHTML(station.id)}" type="button" ${capability.disabled ? "disabled" : ""}>播放</button><button class="button secondary compact" data-player-action="radio_queue" data-item-id="${escapeHTML(station.id)}" type="button" ${capability.disabled ? "disabled" : ""}>加入队列</button><button class="icon-button compact-icon" data-player-action="radio_remove" data-item-id="${escapeHTML(station.id)}" type="button" aria-label="删除 ${escapeHTML(station.name)}" ${capability.disabled ? "disabled" : ""}>×</button></div>
 	</article>`).join("") : `<div class="empty-state compact-empty">尚未收藏网络电台。</div>`;
 	return `
 		<section class="panel player-now">

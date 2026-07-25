@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -45,6 +46,8 @@ func TestUPnPPlayerDiscoversAVTransportAndEscapesMediaURL(t *testing.T) {
 			fmt.Fprint(w, `<CurrentTransportState>PAUSED_PLAYBACK</CurrentTransportState>`)
 		case strings.HasSuffix(action, "#GetPositionInfo"):
 			fmt.Fprint(w, `<TrackDuration>01:02:03</TrackDuration><RelTime>00:01:07</RelTime>`)
+		case strings.HasSuffix(action, "#GetMediaInfo"):
+			fmt.Fprint(w, `<CurrentURI>https://media.example/song.mp3?token=a&amp;part=2</CurrentURI>`)
 		default:
 			fmt.Fprint(w, `<ok/>`)
 		}
@@ -65,14 +68,14 @@ func TestUPnPPlayerDiscoversAVTransportAndEscapesMediaURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.State != "paused" || status.DurationSeconds != 3723 || status.PositionSeconds != 67 {
+	if status.State != "paused" || status.DurationSeconds != 3723 || status.PositionSeconds != 67 || status.CurrentURI != mediaURL {
 		t.Fatalf("unexpected transport status: %#v", status)
 	}
 	joined := strings.Join(bodies, "\n")
 	if !strings.Contains(joined, "token=a&amp;part=2") || strings.Contains(joined, "token=a&part=2") {
 		t.Fatalf("media URL was not XML escaped: %s", joined)
 	}
-	if len(actions) != 4 || !strings.HasSuffix(actions[0], "#SetAVTransportURI") || !strings.HasSuffix(actions[1], "#Play") {
+	if len(actions) != 5 || !strings.HasSuffix(actions[0], "#SetAVTransportURI") || !strings.HasSuffix(actions[1], "#Play") || !strings.HasSuffix(actions[4], "#GetMediaInfo") {
 		t.Fatalf("unexpected SOAP actions: %#v", actions)
 	}
 }
@@ -305,6 +308,58 @@ func TestPlaybackManagerMaintainsNetworkRadioStations(t *testing.T) {
 	player, err = manager.control(ctx, domain.PlayerCommand{Action: "radio_remove", ItemID: stationID})
 	if err != nil || len(player.Stations) != 0 {
 		t.Fatalf("radio station was not removed: %#v %v", player, err)
+	}
+}
+
+func TestPlaybackManagerRecoversCurrentStationFromKPlayerURI(t *testing.T) {
+	controller := &fakePlayerController{state: playerTransport{
+		State:      "playing",
+		CurrentURI: "http://radio.example/fm101.m3u8?",
+	}}
+	manager := newPlaybackManager(controller, kplayerDiscoveryRunner{}, time.Now)
+	manager.stationsLoaded = true
+	manager.stations = []radioEntry{{ID: "fm101", Name: "江苏交通广播 FM101.1", URL: "http://radio.example/fm101.m3u8"}}
+
+	player, err := manager.status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if player.Current == nil || player.Current.Title != "江苏交通广播 FM101.1" || player.Current.Kind != "radio" || player.Current.Source != "http://radio.example/fm101.m3u8" {
+		t.Fatalf("current station was not recovered from KPlayer: %#v", player.Current)
+	}
+}
+
+func TestPlaybackManagerReordersAndPersistsRadioStations(t *testing.T) {
+	runner := &recordingRunner{}
+	controller := &fakePlayerController{state: playerTransport{State: "stopped"}}
+	manager := newPlaybackManager(controller, runner, func() time.Time { return time.UnixMilli(6789) })
+	ctx := context.Background()
+
+	for index, name := range []string{"A 电台", "B 电台", "C 电台"} {
+		if _, err := manager.control(ctx, domain.PlayerCommand{Action: "radio_add", Title: name, URL: fmt.Sprintf("https://radio.example/%d.mp3", index)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	player, err := manager.status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cID := player.Stations[2].ID
+	player, err = manager.control(ctx, domain.PlayerCommand{Action: "radio_move_up", ItemID: cID})
+	if err != nil || player.Stations[1].Name != "C 电台" {
+		t.Fatalf("station was not moved up: %#v %v", player.Stations, err)
+	}
+	player, err = manager.control(ctx, domain.PlayerCommand{Action: "radio_move_down", ItemID: cID})
+	if err != nil || player.Stations[2].Name != "C 电台" {
+		t.Fatalf("station was not moved down: %#v %v", player.Stations, err)
+	}
+
+	var persisted []radioEntry
+	if err := json.Unmarshal(runner.files[radioStationsPath], &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if len(persisted) != 3 || persisted[2].Name != "C 电台" {
+		t.Fatalf("station order was not persisted: %#v", persisted)
 	}
 }
 

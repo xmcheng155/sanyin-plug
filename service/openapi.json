@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "三音本地配置服务 API",
-	"version": "1.6.0",
+	"version": "1.7.0",
 	"description": "同一套契约支持 Mock 与真实设备模式；真实设备开放 AirPlay、安全局域网状态读取、KPlayer 本地 URL/队列/网络电台播放、0..100 音量回读调节与最长 60 分钟的设备端定时停止，以及带设备验收或自动回退的实验性蓝牙、EQ 与 Wi-Fi 配置。"
   },
   "servers": [{ "url": "/api/v1" }],
@@ -18,7 +18,7 @@
     "/lighting": { "get": { "summary": "读取灯光诊断快照", "parameters": [{ "$ref": "#/components/parameters/Scenario" }], "responses": { "200": { "$ref": "#/components/responses/JSONEnvelope" } } }, "patch": { "summary": "预留灯光写接口", "responses": { "409": { "$ref": "#/components/responses/NotReady" } } } },
     "/schedules": { "get": { "summary": "读取计划任务诊断快照", "parameters": [{ "$ref": "#/components/parameters/Scenario" }], "responses": { "200": { "$ref": "#/components/responses/JSONEnvelope" } } } },
     "/player": { "get": { "summary": "读取 KPlayer 播放状态、音量、进度、队列、网络电台与定时停止状态", "parameters": [{ "$ref": "#/components/parameters/Scenario" }], "responses": { "200": { "description": "脱敏后的播放器状态", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } } } } } },
-    "/player/control": { "post": { "summary": "控制本地播放、音量、队列、网络电台与定时停止", "description": "真实设备通过标准 UPnP AVTransport 与 RenderingControl 调用原厂 KPlayer。volume_set 接受 0..100 的 volume，仅在本地播放中执行并回读验证，暂停或停止时拒绝；timer_set 接受 1..60 的 durationMinutes 并由音箱端服务到时停止，timer_cancel 取消。完整媒体 URL 只用于设备拉流；响应中的 source 会删除查询参数和用户信息。", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PlayerCommand" } } } }, "responses": { "200": { "description": "控制完成并回读后的播放器状态", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } } }, "400": { "description": "action、媒体 URL、标题、音量或定时范围无效" }, "404": { "description": "队列项或电台不存在" }, "409": { "description": "Mock 能力未开放、播放器未激活，或当前播放项存在操作冲突" } } } },
+    "/player/control": { "post": { "summary": "控制本地播放、音量、队列、网络电台与定时停止", "description": "真实设备通过标准 UPnP AVTransport 与 RenderingControl 调用原厂 KPlayer。volume_set 接受 0..100 的 volume，仅在本地播放中执行并回读验证，暂停或停止时拒绝；radio_move_up 和 radio_move_down 携带 itemId 调整并持久化电台顺序；timer_set 接受 1..60 的 durationMinutes 并由音箱端服务到时停止，timer_cancel 取消。完整媒体 URL 只用于设备拉流；响应中的 source 会删除查询参数和用户信息。", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PlayerCommand" } } } }, "responses": { "200": { "description": "控制完成并回读后的播放器状态", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } } }, "400": { "description": "action、媒体 URL、标题、音量或定时范围无效" }, "404": { "description": "队列项或电台不存在" }, "409": { "description": "Mock 能力未开放、播放器未激活，或当前播放项存在操作冲突" } } } },
     "/events": { "get": { "summary": "订阅归一化状态事件", "parameters": [{ "$ref": "#/components/parameters/Scenario" }], "responses": { "200": { "description": "SSE snapshot 事件", "content": { "text/event-stream": { "schema": { "type": "string" } } } } } } },
 	"/airplay/recover": { "post": { "summary": "恢复 AirPlay 并验收端口", "description": "真实设备模式发送已验证的原生启动命令并验收 TCP 5002；Mock 模式仅在 simulate=true 时演示明确标记的流程。", "parameters": [{ "$ref": "#/components/parameters/Scenario" }, { "name": "simulate", "in": "query", "schema": { "type": "boolean", "default": false } }], "responses": { "202": { "$ref": "#/components/responses/JSONEnvelope" }, "409": { "$ref": "#/components/responses/NotReady" } } } },
 	"/airplay/auto-recover": { "put": { "summary": "修改 AirPlay 自动恢复配置", "description": "仅真实设备模式可用；原子写入自有配置并回读验收，不修改厂商数据库。", "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["enabled"], "properties": { "enabled": { "type": "boolean" } }, "additionalProperties": false } } } }, "responses": { "202": { "$ref": "#/components/responses/JSONEnvelope" }, "400": { "description": "请求格式无效" }, "409": { "$ref": "#/components/responses/NotReady" } } } },
@@ -83,7 +83,7 @@
         "type": "object",
         "required": ["action"],
         "properties": {
-          "action": { "type": "string", "enum": ["play_url", "pause", "resume", "stop", "next", "queue_add", "queue_play", "queue_remove", "queue_clear", "radio_add", "radio_remove", "radio_play", "radio_queue", "timer_set", "timer_cancel", "volume_set"] },
+          "action": { "type": "string", "enum": ["play_url", "pause", "resume", "stop", "next", "queue_add", "queue_play", "queue_remove", "queue_clear", "radio_add", "radio_remove", "radio_play", "radio_queue", "radio_move_up", "radio_move_down", "timer_set", "timer_cancel", "volume_set"] },
           "itemId": { "type": "string" },
           "title": { "type": "string", "maxLength": 100 },
           "url": { "type": "string", "format": "uri", "maxLength": 2048 },

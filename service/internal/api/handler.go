@@ -269,7 +269,7 @@ func validPlayerCommand(command domain.PlayerCommand) bool {
 		return command.URL != "" && command.ItemID == "" && command.DurationMinutes == 0 && command.Volume == nil
 	case "pause", "resume", "stop", "next", "queue_clear":
 		return command.ItemID == "" && command.Title == "" && command.URL == "" && command.DurationMinutes == 0 && command.Volume == nil
-	case "queue_play", "queue_remove", "radio_remove", "radio_play", "radio_queue":
+	case "queue_play", "queue_remove", "radio_remove", "radio_play", "radio_queue", "radio_move_up", "radio_move_down":
 		return command.ItemID != "" && command.Title == "" && command.URL == "" && command.DurationMinutes == 0 && command.Volume == nil
 	case "timer_set":
 		return command.ItemID == "" && command.Title == "" && command.URL == "" && command.DurationMinutes >= 1 && command.DurationMinutes <= 60 && command.Volume == nil
