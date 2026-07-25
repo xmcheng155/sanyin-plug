@@ -217,10 +217,13 @@ test("网页提供本地 URL 播放、完整控制、队列和网络电台", asy
 	assert.match(appSource, /id="stop-timer-form"/);
 	assert.match(appSource, /data-player-action="timer_cancel"/);
 	assert.match(appSource, /最长 60 分钟/);
-	assert.match(appSource, /id="player-volume-form"/);
+	assert.match(appSource, /id="player-volume-range"/);
 	assert.match(appSource, /name="volume"[^>]*min="0"[^>]*max="100"/);
 	assert.match(appSource, /volume_set/);
 	assert.match(appSource, /volumeAdjustable = transport === "playing"/);
+	assert.match(appSource, /松手后立即生效/);
+	assert.match(appSource, /applyPlayerVolume\(event\.target\)/);
+	assert.doesNotMatch(appSource, />应用音量</);
 	assert.match(apiSource, /player\(\)/);
 	assert.match(apiSource, /controlPlayer\(action/);
 	assert.match(apiSource, /request\("\/player\/control"/);

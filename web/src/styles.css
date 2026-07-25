@@ -168,6 +168,7 @@ h1 { margin: 0; font-size: clamp(27px, 3vw, 38px); line-height: 1.12; letter-spa
 .player-volume-copy span { margin-top: 5px; color: var(--ink-soft); font-size: 10px; font-variant-numeric: tabular-nums; }
 .player-volume-control { display: grid; grid-template-columns: auto minmax(120px, 1fr) auto; align-items: center; gap: 9px; color: var(--ink-soft); font-size: 10px; }
 .player-volume-control input { width: 100%; accent-color: var(--accent); }
+.player-volume-hint { color: var(--ink-soft); font-size: 10px; white-space: nowrap; }
 .stop-timer { display: flex; justify-content: space-between; align-items: end; gap: 16px; margin-top: 18px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 14px; background: rgba(255,255,255,.68); }
 .stop-timer-copy strong, .stop-timer-copy span { display: block; }
 .stop-timer-copy strong { font-size: 12px; }
