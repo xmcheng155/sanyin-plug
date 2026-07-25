@@ -1,0 +1,14 @@
+{
+  "name": "sanyin-local-config",
+  "private": true,
+  "type": "module",
+  "scripts": {
+	"dev": "mkdir -p .cache/go-build && GOCACHE=$PWD/.cache/go-build go run ./service/cmd/sanyin-config",
+	"dev:real": "mkdir -p .cache/go-build && GOCACHE=$PWD/.cache/go-build go run ./service/cmd/sanyin-config -mode adb",
+	"test:go": "mkdir -p .cache/go-build && GOCACHE=$PWD/.cache/go-build go test ./service/...",
+    "test:web": "node --test web/tests/*.test.js",
+	"test": "npm run test:go && npm run test:web",
+	"build": "mkdir -p .cache/go-build dist && GOCACHE=$PWD/.cache/go-build go build -o dist/sanyin-config ./service/cmd/sanyin-config",
+	"build:armv7": "mkdir -p .cache/go-build dist && GOCACHE=$PWD/.cache/go-build GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -o dist/sanyin-config-linux-armv7 ./service/cmd/sanyin-config"
+  }
+}

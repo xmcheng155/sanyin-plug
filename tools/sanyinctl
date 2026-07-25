@@ -1,0 +1,474 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEVICE_SCRIPT="$ROOT_DIR/scripts/airplay_restore.sh"
+INIT_SCRIPT="$ROOT_DIR/scripts/airplay_restore.init"
+CONFIG_BINARY="$ROOT_DIR/dist/sanyin-config-linux-armv7"
+CONFIG_INIT_SCRIPT="$ROOT_DIR/scripts/sanyin_config.init"
+EQ_PROBE_SCRIPT="$ROOT_DIR/scripts/eq_event_probe.sh"
+WIFI_SWITCH_SCRIPT="$ROOT_DIR/scripts/wifi_switch_transaction.sh"
+
+ADB_BIN="${ADB:-}"
+SERIAL="${SANYIN_SERIAL:-}"
+ASSUME_YES=0
+FORCE=0
+
+usage() {
+    cat <<'EOF'
+用法：tools/sanyinctl [全局选项] <命令> [参数]
+
+全局选项：
+  --adb PATH       指定 adb 可执行文件
+  --serial SERIAL  指定 ADB 设备序列号
+  --yes, -y        跳过写入/重启确认
+  --force          允许覆盖内容不同的已安装脚本
+  --help, -h       显示帮助
+
+命令：
+  doctor           检查 ADB、设备身份、系统和依赖
+  status           查看持久服务、恢复日志和 5002 端口
+  verify           从设备和 Mac 两侧验证 AirPlay
+  logs             查看恢复日志
+  install          安装/更新持久化 AirPlay 恢复服务
+  uninstall        停止、禁用并删除恢复服务
+  backup [DIR]     备份全部 11 个 NAND 分区
+  reboot           重启并等待 AirPlay 自动恢复
+  config-install   安装/更新音箱端网页配置服务
+  config-status    查看音箱端网页配置服务状态
+  config-password  查看网页登录认证状态和当前密码
+  config-auth-enable  生成密码并启用网页登录认证
+  config-auth-disable 禁用网页登录认证（默认）
+
+示例：
+  ./tools/sanyinctl doctor
+  ./tools/sanyinctl --serial netease_XXXXXXXX status
+  ./tools/sanyinctl backup backups/刷机前
+EOF
+}
+
+info() {
+    printf '[信息] %s\n' "$*"
+}
+
+warn() {
+    printf '[警告] %s\n' "$*" >&2
+}
+
+die() {
+    printf '[错误] %s\n' "$*" >&2
+    exit 1
+}
+
+confirm() {
+    local prompt="$1"
+    if [[ "$ASSUME_YES" -eq 1 ]]; then
+        return 0
+    fi
+    printf '%s [y/N] ' "$prompt" >&2
+    local answer
+    read -r answer
+    [[ "$answer" == "y" || "$answer" == "Y" ]]
+}
+
+find_adb() {
+    if [[ -n "$ADB_BIN" ]]; then
+        [[ -x "$ADB_BIN" ]] || die "ADB 不可执行：$ADB_BIN"
+        return
+    fi
+
+    if [[ -x "$ROOT_DIR/.tools/platform-tools/adb" ]]; then
+        ADB_BIN="$ROOT_DIR/.tools/platform-tools/adb"
+    elif command -v adb >/dev/null 2>&1; then
+        ADB_BIN="$(command -v adb)"
+    elif [[ -x /tmp/sanyin-platform-tools/platform-tools/adb ]]; then
+        ADB_BIN=/tmp/sanyin-platform-tools/platform-tools/adb
+    else
+        die "未找到 adb。请先运行 ./tools/get_adb_macos.sh，或通过 --adb 指定。"
+    fi
+}
+
+find_device() {
+    local devices
+    devices="$("$ADB_BIN" devices 2>/dev/null | awk 'NR > 1 && $2 == "device" {print $1}')"
+
+    if [[ -n "$SERIAL" ]]; then
+        printf '%s\n' "$devices" | grep -Fxq "$SERIAL" || die "ADB 设备未在线：$SERIAL"
+        return
+    fi
+
+    SERIAL="$(printf '%s\n' "$devices" | awk '/^netease_/ {print; exit}')"
+    if [[ -z "$SERIAL" ]]; then
+        SERIAL="$(printf '%s\n' "$devices" | awk 'NF {print; exit}')"
+    fi
+    [[ -n "$SERIAL" ]] || die "没有发现处于 device 状态的 ADB 设备。"
+
+    local count
+    count="$(printf '%s\n' "$devices" | awk 'NF {count++} END {print count+0}')"
+    if [[ "$count" -gt 1 ]]; then
+        warn "检测到多个 ADB 设备，自动选择：${SERIAL}；可使用 --serial 指定。"
+    fi
+}
+
+adb_run() {
+    "$ADB_BIN" -s "$SERIAL" "$@"
+}
+
+device_shell() {
+    adb_run shell "$@"
+}
+
+device_test() {
+	local condition="$1"
+	local result
+	result="$(device_shell "if $condition; then printf true; else printf false; fi" | tr -d '\r')"
+	[[ "$result" == "true" ]]
+}
+
+check_model() {
+	device_test 'test -x /usr/bin/SPlayer' || die "目标设备没有 /usr/bin/SPlayer，不符合已验证的三音固件结构。"
+	device_test 'test -x /usr/bin/dbus-send' || die "目标设备缺少 /usr/bin/dbus-send。"
+}
+
+remote_matches() {
+    local local_file="$1"
+    local remote_file="$2"
+    local local_sum remote_sum
+
+    if command -v md5sum >/dev/null 2>&1; then
+        local_sum="$(md5sum "$local_file" | awk '{print $1}')"
+    elif command -v md5 >/dev/null 2>&1; then
+        local_sum="$(md5 -q "$local_file")"
+    elif command -v openssl >/dev/null 2>&1; then
+        local_sum="$(openssl dgst -md5 -r "$local_file" | awk '{print $1}')"
+    else
+        die "本机缺少 md5sum、md5 或 openssl，无法安全比较已安装脚本。"
+    fi
+
+    remote_sum="$(device_shell "md5sum '$remote_file' 2>/dev/null" | tr -d '\r' | awk '{print $1}')"
+    [[ -n "$remote_sum" && "$local_sum" == "$remote_sum" ]]
+}
+
+ensure_replace_allowed() {
+    local local_file="$1"
+    local remote_file="$2"
+	if ! device_test "test -e '$remote_file'"; then
+        return
+    fi
+    if remote_matches "$local_file" "$remote_file"; then
+        return
+    fi
+    if [[ "$FORCE" -ne 1 ]]; then
+        die "远端文件已存在且内容不同：${remote_file}。检查后使用 --force 覆盖。"
+    fi
+    warn "将覆盖内容不同的远端文件：$remote_file"
+}
+
+cmd_doctor() {
+    info "ADB：$ADB_BIN"
+    "$ADB_BIN" version | sed -n '1,3p'
+    info "设备：$SERIAL"
+    adb_run get-state
+    info "身份与内核"
+    device_shell 'id; uname -a; cat /proc/version'
+    info "固件与关键组件"
+    device_shell 'grep -E "DISTRIB_(ID|RELEASE|DESCRIPTION)" /etc/openwrt_release 2>/dev/null; ls -l /usr/bin/SPlayer /usr/bin/dbus-send /tmp/dbus_env.sh 2>/dev/null'
+    info "存储空间"
+    device_shell 'df -h /overlay /tmp /mnt/UDISK'
+    check_model
+    info "检查通过：设备具备已验证的 SPlayer/D-Bus 修复条件。"
+}
+
+cmd_status() {
+    check_model
+    info "设备：$SERIAL"
+    device_shell 'echo "== Wi-Fi =="; ifconfig wlan0 2>/dev/null; echo "== procd =="; ubus call service list "{\"name\":\"airplay_restore\"}" 2>/dev/null; echo "== 进程 =="; ps w | grep -E "[S]Player|[a]irplay_restore"; echo "== 端口 =="; netstat -lntp 2>/dev/null | grep -E ":5002 |:5005 " || true; echo "== 恢复日志 =="; tail -n 30 /tmp/airplay_restore.log 2>/dev/null || true'
+}
+
+cmd_logs() {
+    device_shell 'echo "== /tmp/airplay_restore.log =="; cat /tmp/airplay_restore.log 2>/dev/null || true; echo "== SPlayer 相关日志 =="; find /tmp /mnt/UDISK/log -maxdepth 2 -type f -iname "*splayer*" -print 2>/dev/null'
+}
+
+cmd_install() {
+    check_model
+    [[ -f "$DEVICE_SCRIPT" ]] || die "本地脚本不存在：$DEVICE_SCRIPT"
+    [[ -f "$INIT_SCRIPT" ]] || die "本地启动脚本不存在：$INIT_SCRIPT"
+    ensure_replace_allowed "$DEVICE_SCRIPT" /usr/bin/airplay_restore.sh
+    ensure_replace_allowed "$INIT_SCRIPT" /etc/init.d/airplay_restore
+
+    confirm "将在 $SERIAL 的 overlay 中安装并启用 AirPlay 恢复服务，继续吗？" || die "用户取消。"
+
+    local suffix="$$"
+    local remote_device="/tmp/airplay_restore.sh.$suffix"
+    local remote_init="/tmp/airplay_restore.init.$suffix"
+
+    adb_run push "$DEVICE_SCRIPT" "$remote_device"
+    adb_run push "$INIT_SCRIPT" "$remote_init"
+    device_shell cp "$remote_device" /usr/bin/airplay_restore.sh
+    device_shell chmod 0755 /usr/bin/airplay_restore.sh
+    device_shell cp "$remote_init" /etc/init.d/airplay_restore
+    device_shell chmod 0755 /etc/init.d/airplay_restore
+    device_shell rm -f "$remote_device" "$remote_init"
+    device_shell '/etc/init.d/airplay_restore enable'
+    device_shell '/etc/init.d/airplay_restore restart'
+    info "安装完成。守护脚本会在 Wi-Fi 和 SPlayer 就绪后自动恢复 TCP 5002。"
+    cmd_status
+}
+
+cmd_uninstall() {
+    confirm "将从 $SERIAL 的 overlay 删除 AirPlay 持久化恢复服务，继续吗？" || die "用户取消。"
+    device_shell '/etc/init.d/airplay_restore stop 2>/dev/null || true'
+    device_shell '/etc/init.d/airplay_restore disable 2>/dev/null || true'
+    device_shell rm -f /usr/bin/airplay_restore.sh /etc/init.d/airplay_restore /etc/rc.d/S122airplay_restore /etc/rc.d/K122airplay_restore
+    info "卸载完成。当前 SPlayer 监听可能持续到控制中心关闭它或设备重启。"
+}
+
+expected_size() {
+    case "$1" in
+        nanda|nandb|nandg|nandi|nandj) echo 1048576 ;;
+        nandc|nande) echo 4194304 ;;
+        nandd|nandf) echo 73400320 ;;
+        nandh) echo 10485760 ;;
+        nandk) echo 62914560 ;;
+        *) return 1 ;;
+    esac
+}
+
+file_size() {
+    if stat -f '%z' "$1" >/dev/null 2>&1; then
+        stat -f '%z' "$1"
+    else
+        stat -c '%s' "$1"
+    fi
+}
+
+cmd_backup() {
+    check_model
+    local destination="${1:-$ROOT_DIR/backups/$(date '+%Y%m%d-%H%M%S')}"
+    local remote_temp=/tmp/sanyin-nand-backup.img
+    local partitions=(nanda nandb nandc nandd nande nandf nandg nandh nandi nandj nandk)
+    mkdir -p "$destination"
+    destination="$(cd "$destination" && pwd)"
+
+    info "备份目录：$destination"
+    device_shell 'cat /proc/partitions; echo; cat /proc/cmdline; echo; uname -a; echo; cat /etc/openwrt_release 2>/dev/null' > "$destination/device-info.txt"
+
+    local partition expected actual
+    for partition in "${partitions[@]}"; do
+        expected="$(expected_size "$partition")"
+        info "读取 /dev/${partition}（预期 $expected 字节）"
+        device_shell dd "if=/dev/$partition" "of=$remote_temp" bs=1048576
+        adb_run pull "$remote_temp" "$destination/$partition.img"
+        device_shell rm -f "$remote_temp"
+        actual="$(file_size "$destination/$partition.img")"
+        [[ "$actual" == "$expected" ]] || die "$partition 大小异常：实际 ${actual}，预期 $expected"
+    done
+
+    (
+        cd "$destination"
+        shasum -a 256 nand*.img > SHA256SUMS
+        shasum -a 256 -c SHA256SUMS
+    )
+    info "NAND 备份及 SHA-256 校验完成：$destination"
+}
+
+wait_for_port() {
+    local attempts="${1:-45}"
+    local i
+    for ((i = 1; i <= attempts; i++)); do
+		if device_test 'netstat -lnt 2>/dev/null | grep -q ":5002 "'; then
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
+}
+
+cmd_verify() {
+    check_model
+    info "检查设备端服务与端口"
+	if device_test 'netstat -lnt 2>/dev/null | grep -q ":5002 "'; then
+        info "设备端 TCP 5002 正在监听。"
+    else
+        die "设备端 TCP 5002 未监听。请先查看 status 和 logs。"
+    fi
+
+    local ip
+    ip="$(device_shell "ifconfig wlan0 2>/dev/null" | tr -d '\r' | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p' | head -n 1)"
+    [[ -n "$ip" ]] || die "无法取得 wlan0 IPv4 地址。"
+    info "音箱 IP：$ip"
+
+    if command -v nc >/dev/null 2>&1; then
+        nc -vz "$ip" 5002
+    else
+        warn "本机没有 nc，跳过主机侧 TCP 检查。"
+    fi
+
+    if command -v dns-sd >/dev/null 2>&1; then
+        local browse_file browse_pid
+        browse_file="$(mktemp -t sanyin-raop.XXXXXX)"
+        dns-sd -B _raop._tcp local. > "$browse_file" 2>&1 &
+        browse_pid=$!
+        sleep 3
+        kill "$browse_pid" >/dev/null 2>&1 || true
+        wait "$browse_pid" >/dev/null 2>&1 || true
+        if grep -q '三音云音箱' "$browse_file"; then
+            info "Bonjour 已发现三音云音箱："
+            grep '三音云音箱' "$browse_file"
+        else
+            warn "TCP 正常，但 3 秒内未发现三音 Bonjour 广播。可手工运行：dns-sd -B _raop._tcp local."
+        fi
+        rm -f "$browse_file"
+    fi
+}
+
+cmd_reboot() {
+    confirm "将重启 ${SERIAL}，并等待 AirPlay 最多约 90 秒，继续吗？" || die "用户取消。"
+    adb_run reboot
+    info "等待 ADB 重新连接……"
+    adb_run wait-for-device
+    info "ADB 已连接，等待 Wi-Fi 与 AirPlay 端口……"
+    if wait_for_port 45; then
+        info "重启后 TCP 5002 已自动恢复。"
+        cmd_verify
+        device_shell 'tail -n 20 /tmp/airplay_restore.log 2>/dev/null || true'
+    else
+        cmd_status
+        die "90 秒内未检测到 TCP 5002。"
+    fi
+}
+
+cmd_config_status() {
+	info "音箱端网页配置服务"
+	device_shell 'ubus call service list "{\"name\":\"sanyin_config\"}" 2>/dev/null; echo "== 进程 =="; ps w | grep "[s]anyin-config" || true; echo "== 端口 =="; netstat -lntp 2>/dev/null | grep ":8787 " || true; echo "== 配置 =="; if [ -s /mnt/UDISK/sanyin-config/web-password ]; then echo "authentication=enabled"; else echo "authentication=disabled"; fi'
+}
+
+cmd_config_install() {
+	check_model
+	[[ -f "$CONFIG_BINARY" ]] || die "缺少 ARMv7 程序：$CONFIG_BINARY。请先运行 npm run build:armv7。"
+	[[ -f "$CONFIG_INIT_SCRIPT" ]] || die "缺少启动脚本：$CONFIG_INIT_SCRIPT"
+	[[ -f "$EQ_PROBE_SCRIPT" ]] || die "缺少 EQ 验收脚本：$EQ_PROBE_SCRIPT"
+	[[ -f "$WIFI_SWITCH_SCRIPT" ]] || die "缺少 Wi-Fi 切换脚本：$WIFI_SWITCH_SCRIPT"
+	ensure_replace_allowed "$CONFIG_BINARY" /mnt/UDISK/sanyin-config/sanyin-config
+	ensure_replace_allowed "$CONFIG_INIT_SCRIPT" /etc/init.d/sanyin_config
+	ensure_replace_allowed "$EQ_PROBE_SCRIPT" /usr/bin/sanyin_eq_probe.sh
+	ensure_replace_allowed "$WIFI_SWITCH_SCRIPT" /usr/bin/sanyin_wifi_switch.sh
+	confirm "将在 $SERIAL 的 UDISK 和 overlay 中安装网页配置服务，并监听局域网 TCP 8787，继续吗？" || die "用户取消。"
+
+	local suffix="$$"
+	local remote_binary="/tmp/sanyin-config.$suffix"
+	local remote_init="/tmp/sanyin-config.init.$suffix"
+	local remote_eq_probe="/tmp/sanyin-eq-probe.$suffix"
+	local remote_wifi_switch="/tmp/sanyin-wifi-switch.$suffix"
+	adb_run push "$CONFIG_BINARY" "$remote_binary"
+	adb_run push "$CONFIG_INIT_SCRIPT" "$remote_init"
+	adb_run push "$EQ_PROBE_SCRIPT" "$remote_eq_probe"
+	adb_run push "$WIFI_SWITCH_SCRIPT" "$remote_wifi_switch"
+	device_shell 'mkdir -p /mnt/UDISK/sanyin-config'
+	device_shell mv "$remote_binary" /mnt/UDISK/sanyin-config/sanyin-config
+	device_shell chmod 0755 /mnt/UDISK/sanyin-config/sanyin-config
+	device_shell mv "$remote_init" /etc/init.d/sanyin_config
+	device_shell chmod 0755 /etc/init.d/sanyin_config
+	device_shell mv "$remote_eq_probe" /usr/bin/sanyin_eq_probe.sh
+	device_shell chmod 0755 /usr/bin/sanyin_eq_probe.sh
+	device_shell mv "$remote_wifi_switch" /usr/bin/sanyin_wifi_switch.sh
+	device_shell chmod 0700 /usr/bin/sanyin_wifi_switch.sh
+
+	device_shell '/etc/init.d/sanyin_config enable'
+	device_shell '/etc/init.d/sanyin_config restart'
+	sleep 1
+	cmd_config_status
+}
+
+cmd_config_password() {
+	if ! device_test 'test -s /mnt/UDISK/sanyin-config/web-password'; then
+		printf '认证状态：未启用（默认）\n'
+		return 0
+	fi
+	printf '认证状态：已启用\n'
+	printf '用户名：admin\n密码：'
+	device_shell 'cat /mnt/UDISK/sanyin-config/web-password' | tr -d '\r'
+}
+
+cmd_config_auth_enable() {
+	command -v openssl >/dev/null 2>&1 || die "本机缺少 openssl，无法生成网页密码。"
+	local generated_password password_temp
+	generated_password="$(openssl rand -hex 16)"
+	password_temp="$(mktemp -t sanyin-web-password.XXXXXX)"
+	chmod 0600 "$password_temp"
+	printf '%s\n' "$generated_password" > "$password_temp"
+	adb_run push "$password_temp" /tmp/sanyin-web-password
+	rm -f "$password_temp"
+	device_shell 'mkdir -p /mnt/UDISK/sanyin-config'
+	device_shell mv /tmp/sanyin-web-password /mnt/UDISK/sanyin-config/web-password
+	device_shell chmod 0600 /mnt/UDISK/sanyin-config/web-password
+	device_shell '/etc/init.d/sanyin_config restart'
+	info "网页登录认证已启用"
+	printf '用户名：admin\n密码：%s\n' "$generated_password"
+}
+
+cmd_config_auth_disable() {
+	confirm "将禁用网页登录密码，同一局域网内可直接访问，继续吗？" || die "用户取消。"
+	device_shell rm -f /mnt/UDISK/sanyin-config/web-password
+	device_shell '/etc/init.d/sanyin_config restart'
+	info "网页登录认证已禁用。"
+	cmd_config_status
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --adb)
+            [[ $# -ge 2 ]] || die "--adb 需要路径"
+            ADB_BIN="$2"
+            shift 2
+            ;;
+        --serial)
+            [[ $# -ge 2 ]] || die "--serial 需要序列号"
+            SERIAL="$2"
+            shift 2
+            ;;
+        --yes|-y)
+            ASSUME_YES=1
+            shift
+            ;;
+        --force)
+            FORCE=1
+            shift
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        --*)
+            die "未知选项：$1"
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+COMMAND="${1:-}"
+[[ -n "$COMMAND" ]] || { usage; exit 1; }
+shift || true
+
+find_adb
+find_device
+
+case "$COMMAND" in
+    doctor) cmd_doctor "$@" ;;
+    status) cmd_status "$@" ;;
+    verify) cmd_verify "$@" ;;
+    logs) cmd_logs "$@" ;;
+    install) cmd_install "$@" ;;
+    uninstall) cmd_uninstall "$@" ;;
+    backup) cmd_backup "$@" ;;
+	reboot) cmd_reboot "$@" ;;
+	config-install) cmd_config_install "$@" ;;
+	config-status) cmd_config_status "$@" ;;
+	config-password) cmd_config_password "$@" ;;
+	config-auth-enable) cmd_config_auth_enable "$@" ;;
+	config-auth-disable) cmd_config_auth_disable "$@" ;;
+    help) usage ;;
+    *) die "未知命令：${COMMAND}。使用 --help 查看帮助。" ;;
+esac

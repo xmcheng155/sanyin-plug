@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#f5f6f2">
+  <title>三音 · 本地配置</title>
+  <link rel="stylesheet" href="/src/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="主导航">
+      <a class="brand" href="#overview" aria-label="三音本地配置首页">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span><strong>三音</strong><small>本地配置</small></span>
+      </a>
+      <nav id="desktop-nav" class="nav-list"></nav>
+      <div class="sidebar-foot">
+        <span class="status-dot"></span>
+        <span><strong id="runtime-mode-title">本地模式</strong><small id="runtime-mode-detail">正在识别服务</small></span>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">LOCAL CONTROL</p>
+          <h1 id="page-title">设备总览</h1>
+        </div>
+        <div class="topbar-actions">
+          <label class="scenario-control">
+            <span>模拟场景</span>
+            <select id="scenario-select" aria-label="选择模拟场景"></select>
+          </label>
+          <button id="refresh-button" class="icon-button" type="button" aria-label="刷新状态" title="刷新状态">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <div id="environment-banner" class="environment-banner" role="status">
+        <span class="banner-icon">M</span>
+		<span><strong>模拟数据环境</strong><small>所有状态和操作均为本机 Mock，不会连接或修改音箱。</small></span>
+      </div>
+
+      <section id="page-content" class="page-content" aria-live="polite">
+        <div class="loading-state">
+          <span class="loader"></span>
+          <p>正在读取本地配置 API…</p>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <nav id="mobile-nav" class="mobile-nav" aria-label="移动端主导航"></nav>
+
+  <dialog id="operation-dialog" class="operation-dialog">
+    <form method="dialog" class="dialog-card">
+      <button class="dialog-close" value="cancel" aria-label="关闭">×</button>
+      <div id="operation-dialog-content"></div>
+    </form>
+  </dialog>
+
+  <div id="toast-region" class="toast-region" aria-live="assertive"></div>
+  <script type="module" src="/src/app.js"></script>
+</body>
+</html>

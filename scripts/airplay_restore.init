@@ -1,0 +1,13 @@
+#!/bin/sh /etc/rc.common
+
+START=122
+STOP=122
+USE_PROCD=1
+DEPEND=netease_cc_service,netease_player_service,avahi-daemon
+
+start_service() {
+    procd_open_instance
+    procd_set_param command /usr/bin/airplay_restore.sh
+    procd_set_param respawn
+    procd_close_instance
+}

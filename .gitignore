@@ -1,0 +1,10 @@
+.DS_Store
+.tools/
+.venv/
+.cache/
+__pycache__/
+*.pyc
+
+# NAND 镜像可能包含 Wi-Fi 密码、设备令牌和个人数据，只保留在本机。
+backups/
+dist/

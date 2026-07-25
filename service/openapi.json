@@ -1,0 +1,120 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "三音本地配置服务 API",
+	"version": "1.5.0",
+	"description": "同一套契约支持 Mock 与真实设备模式；真实设备开放 AirPlay、安全局域网状态读取、KPlayer 本地 URL/队列/网络电台播放与最长 60 分钟的设备端定时停止，以及带设备验收或自动回退的实验性蓝牙、EQ 与 Wi-Fi 配置。"
+  },
+  "servers": [{ "url": "/api/v1" }],
+  "paths": {
+    "/capabilities": { "get": { "summary": "读取能力矩阵", "parameters": [{ "$ref": "#/components/parameters/Scenario" }], "responses": { "200": { "$ref": "#/components/responses/JSONEnvelope" } } } },
+    "/device": { "get": { "summary": "读取脱敏设备信息", "parameters": [{ "$ref": "#/components/parameters/Scenario" }], "responses": { "200": { "$ref": "#/components/responses/JSONEnvelope" } } } },
+    "/status": { "get": { "summary": "读取聚合状态", "parameters": [{ "$ref": "#/components/parameters/Scenario" }], "responses": { "200": { "$ref": "#/components/responses/JSONEnvelope" } } } },
+    "/airplay": { "get": { "summary": "读取 AirPlay 运行态", "parameters": [{ "$ref": "#/components/parameters/Scenario" }], "responses": { "200": { "$ref": "#/components/responses/JSONEnvelope" } } } },
+    "/network": { "get": { "summary": "读取脱敏网络状态", "parameters": [{ "$ref": "#/components/parameters/Scenario" }], "responses": { "200": { "$ref": "#/components/responses/JSONEnvelope" } } } },
+    "/audio": { "get": { "summary": "读取音频与 EQ 分层状态", "parameters": [{ "$ref": "#/components/parameters/Scenario" }], "responses": { "200": { "$ref": "#/components/responses/JSONEnvelope" } } }, "patch": { "summary": "预留音频写接口", "responses": { "409": { "$ref": "#/components/responses/NotReady" } } } },
+	"/audio/effect": { "patch": { "summary": "修改 EQ 业务模式", "description": "仅接受固件定义的整数 0..6；通过 loopback 控制器接口写入，并等待 commonStatus 选中态事件验收。硬件应用态由 ADAU1761 文件独立回读。", "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["mode"], "properties": { "mode": { "type": "integer", "minimum": 0, "maximum": 6 } }, "additionalProperties": false } } } }, "responses": { "202": { "$ref": "#/components/responses/JSONEnvelope" }, "400": { "description": "请求格式或模式范围无效" }, "409": { "$ref": "#/components/responses/NotReady" } } } },
+    "/bluetooth": { "get": { "summary": "读取蓝牙服务、当前未知态与最近确认开关状态", "parameters": [{ "$ref": "#/components/parameters/Scenario" }], "responses": { "200": { "$ref": "#/components/responses/JSONEnvelope" } } }, "patch": { "summary": "修改蓝牙开关", "description": "真实设备模式通过厂商 D-Bus 命令修改蓝牙，并等待对应成功事件后才返回成功；Mock 模式返回 409。", "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["enabled"], "properties": { "enabled": { "type": "boolean" } }, "additionalProperties": false } } } }, "responses": { "202": { "$ref": "#/components/responses/JSONEnvelope" }, "400": { "description": "请求格式无效" }, "409": { "$ref": "#/components/responses/NotReady" } } } },
+    "/lighting": { "get": { "summary": "读取灯光诊断快照", "parameters": [{ "$ref": "#/components/parameters/Scenario" }], "responses": { "200": { "$ref": "#/components/responses/JSONEnvelope" } } }, "patch": { "summary": "预留灯光写接口", "responses": { "409": { "$ref": "#/components/responses/NotReady" } } } },
+    "/schedules": { "get": { "summary": "读取计划任务诊断快照", "parameters": [{ "$ref": "#/components/parameters/Scenario" }], "responses": { "200": { "$ref": "#/components/responses/JSONEnvelope" } } } },
+    "/player": { "get": { "summary": "读取 KPlayer 播放状态、进度、队列、网络电台与定时停止状态", "parameters": [{ "$ref": "#/components/parameters/Scenario" }], "responses": { "200": { "description": "脱敏后的播放器状态", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } } } } } },
+    "/player/control": { "post": { "summary": "控制本地播放、队列、网络电台与定时停止", "description": "真实设备通过标准 UPnP AVTransport 调用原厂 KPlayer。timer_set 接受 1..60 的 durationMinutes 并由音箱端服务到时执行停止，timer_cancel 取消；手动停止或清空队列也会取消定时器。完整媒体 URL 只用于设备拉流；响应中的 source 会删除查询参数和用户信息。", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PlayerCommand" } } } }, "responses": { "200": { "description": "控制完成并回读后的播放器状态", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } } }, "400": { "description": "action、媒体 URL、标题或定时范围无效" }, "404": { "description": "队列项或电台不存在" }, "409": { "description": "Mock 能力未开放，或当前播放项存在操作冲突" } } } },
+    "/events": { "get": { "summary": "订阅归一化状态事件", "parameters": [{ "$ref": "#/components/parameters/Scenario" }], "responses": { "200": { "description": "SSE snapshot 事件", "content": { "text/event-stream": { "schema": { "type": "string" } } } } } } },
+	"/airplay/recover": { "post": { "summary": "恢复 AirPlay 并验收端口", "description": "真实设备模式发送已验证的原生启动命令并验收 TCP 5002；Mock 模式仅在 simulate=true 时演示明确标记的流程。", "parameters": [{ "$ref": "#/components/parameters/Scenario" }, { "name": "simulate", "in": "query", "schema": { "type": "boolean", "default": false } }], "responses": { "202": { "$ref": "#/components/responses/JSONEnvelope" }, "409": { "$ref": "#/components/responses/NotReady" } } } },
+	"/airplay/auto-recover": { "put": { "summary": "修改 AirPlay 自动恢复配置", "description": "仅真实设备模式可用；原子写入自有配置并回读验收，不修改厂商数据库。", "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["enabled"], "properties": { "enabled": { "type": "boolean" } }, "additionalProperties": false } } } }, "responses": { "202": { "$ref": "#/components/responses/JSONEnvelope" }, "400": { "description": "请求格式无效" }, "409": { "$ref": "#/components/responses/NotReady" } } } },
+    "/network/switch": { "post": { "summary": "切换 Wi-Fi 并在失败时自动回退", "description": "音箱端先备份当前配置，再验收目标 SSID、IPv4、默认路由和网关可达；45 秒内失败则恢复原配置并重新联网。密码不进入响应或日志，事务完成后删除临时文件。", "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["ssid", "password"], "properties": { "ssid": { "type": "string", "minLength": 1, "maxLength": 32 }, "password": { "type": "string", "description": "空字符串表示开放网络；否则为 8..63 字节密码或 64 位十六进制 PSK。" } }, "additionalProperties": false } } } }, "responses": { "202": { "$ref": "#/components/responses/JSONEnvelope" }, "400": { "description": "SSID 或密码格式无效" }, "409": { "$ref": "#/components/responses/NotReady" } } } },
+    "/microphone/schedule": { "put": { "summary": "预留麦克风计划写接口", "responses": { "409": { "$ref": "#/components/responses/NotReady" } } } },
+    "/mock/scenarios": { "get": { "summary": "列出可用 Mock 场景", "responses": { "200": { "$ref": "#/components/responses/JSONEnvelope" } } } }
+  },
+  "components": {
+    "parameters": {
+      "Scenario": {
+        "name": "scenario",
+        "in": "query",
+        "description": "Mock 场景；省略时为 healthy。",
+        "schema": { "$ref": "#/components/schemas/ScenarioID" }
+      }
+    },
+    "responses": {
+      "JSONEnvelope": {
+        "description": "带环境和场景标识的响应",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } }
+      },
+      "NotReady": {
+        "description": "能力尚未完成安全写入验证",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      }
+    },
+    "schemas": {
+      "ScenarioID": {
+        "type": "string",
+        "enum": ["healthy", "airplay_down", "wifi_offline", "controller_down", "bluetooth_unknown", "eq_pending", "stale_state", "operation_failed"]
+      },
+      "Readability": { "type": "string", "enum": ["full", "partial", "none"] },
+      "Writability": { "type": "string", "enum": ["safe", "experimental", "not_verified", "unsupported"] },
+      "Availability": { "type": "string", "enum": ["available", "degraded", "offline", "unknown"] },
+      "Source": { "type": "string", "enum": ["system", "dbus_event", "mock", "vendor_snapshot", "derived"] },
+      "Freshness": { "type": "string", "enum": ["fresh", "stale", "unknown"] },
+      "State": {
+        "type": "object",
+        "required": ["value", "observedAt", "source", "freshness", "revision"],
+        "properties": {
+          "value": {},
+          "observedAt": { "type": "string", "format": "date-time" },
+          "source": { "$ref": "#/components/schemas/Source" },
+          "freshness": { "$ref": "#/components/schemas/Freshness" },
+          "revision": { "type": "integer", "minimum": 1 }
+        },
+        "additionalProperties": false
+      },
+      "Capability": {
+        "type": "object",
+        "required": ["id", "readability", "writability", "availability", "cloudDependency"],
+        "properties": {
+          "id": { "type": "string" },
+          "readability": { "$ref": "#/components/schemas/Readability" },
+          "writability": { "$ref": "#/components/schemas/Writability" },
+          "availability": { "$ref": "#/components/schemas/Availability" },
+          "cloudDependency": { "type": "boolean" },
+          "reason": { "type": "string" }
+        }
+      },
+      "PlayerCommand": {
+        "type": "object",
+        "required": ["action"],
+        "properties": {
+          "action": { "type": "string", "enum": ["play_url", "pause", "resume", "stop", "next", "queue_add", "queue_play", "queue_remove", "queue_clear", "radio_add", "radio_remove", "radio_play", "radio_queue", "timer_set", "timer_cancel"] },
+          "itemId": { "type": "string" },
+          "title": { "type": "string", "maxLength": 100 },
+          "url": { "type": "string", "format": "uri", "maxLength": 2048 },
+          "durationMinutes": { "type": "integer", "minimum": 1, "maximum": 60 }
+        },
+        "additionalProperties": false
+      },
+      "Envelope": {
+        "type": "object",
+        "required": ["environment", "scenario", "data"],
+        "properties": {
+		  "environment": { "type": "string", "enum": ["mock", "device"] },
+		  "scenario": { "type": "string" },
+          "data": {}
+        }
+      },
+      "Error": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["code", "message", "operationId"],
+            "properties": {
+              "code": { "type": "string" },
+              "message": { "type": "string" },
+              "operationId": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
+    }
+  }
+}
