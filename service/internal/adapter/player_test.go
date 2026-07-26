@@ -410,6 +410,162 @@ func TestPlaybackManagerReordersAndPersistsRadioStations(t *testing.T) {
 	}
 }
 
+func TestPlaybackManagerPersistsAndRedactsPlayerScenes(t *testing.T) {
+	runner := &recordingRunner{}
+	controller := &fakePlayerController{state: playerTransport{State: "stopped"}}
+	manager := newPlaybackManager(controller, runner, func() time.Time { return time.UnixMilli(7890) })
+	ctx := context.Background()
+
+	scenes, err := manager.createScene(ctx, domain.PlayerSceneInput{
+		Name: "  专注阅读  ", Icon: "focus", Title: "轻音乐", URL: "https://media.example/focus.mp3?token=private", Volume: 24, TimerMinutes: 45,
+	})
+	if err != nil || len(scenes) != 1 {
+		t.Fatalf("scene was not created: %#v %v", scenes, err)
+	}
+	if scenes[0].Name != "专注阅读" || scenes[0].Volume != 24 || strings.Contains(scenes[0].Source, "token") {
+		t.Fatalf("scene response was not normalized or redacted: %#v", scenes[0])
+	}
+	if scenes[0].Schedule.Enabled || scenes[0].Schedule.Time != "07:30" || len(scenes[0].Schedule.Weekdays) != 7 {
+		t.Fatalf("legacy scene did not receive a safe disabled schedule: %#v", scenes[0].Schedule)
+	}
+	var persisted []sceneEntry
+	if err := json.Unmarshal(runner.files[playerScenesPath], &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if len(persisted) != 1 || !strings.Contains(persisted[0].URL, "token=private") {
+		t.Fatalf("complete private URL was not persisted on-device: %#v", persisted)
+	}
+
+	id := scenes[0].ID
+	scenes, err = manager.updateScene(ctx, id, domain.PlayerSceneInput{
+		Name: "深度工作", Icon: "music", Title: "白噪音", URL: "", Volume: 18, TimerMinutes: 60,
+	})
+	if err != nil || len(scenes) != 1 || scenes[0].ID != id || scenes[0].Name != "深度工作" {
+		t.Fatalf("scene was not updated in place: %#v %v", scenes, err)
+	}
+	if err := json.Unmarshal(runner.files[playerScenesPath], &persisted); err != nil || !strings.Contains(persisted[0].URL, "token=private") {
+		t.Fatalf("empty scene update did not preserve the complete URL: %#v %v", persisted, err)
+	}
+	scenes, err = manager.deleteScene(ctx, id)
+	if err != nil || len(scenes) != 0 {
+		t.Fatalf("scene was not deleted: %#v %v", scenes, err)
+	}
+	if _, err := manager.createScene(ctx, domain.PlayerSceneInput{Name: "坏场景", Icon: "unknown", URL: "file:///etc/passwd", Volume: 101}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("invalid scene was accepted: %v", err)
+	}
+}
+
+func TestPlaybackManagerRejectsOverlappingSceneSchedules(t *testing.T) {
+	runner := &recordingRunner{}
+	manager := newPlaybackManager(&fakePlayerController{state: playerTransport{State: "stopped"}}, runner, func() time.Time {
+		return time.Date(2026, 7, 27, 6, 0, 0, 0, time.FixedZone("CST", 8*60*60))
+	})
+	ctx := context.Background()
+
+	if _, err := manager.createScene(ctx, domain.PlayerSceneInput{
+		Name: "工作日清晨", Icon: "morning", URL: "https://media.example/morning.mp3", Volume: 25,
+		Schedule: domain.PlayerSceneScheduleInput{Enabled: true, Time: "07:30", Weekdays: []int{1, 2, 3, 4, 5}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.createScene(ctx, domain.PlayerSceneInput{
+		Name: "周一提醒", Icon: "music", URL: "https://media.example/monday.mp3", Volume: 20,
+		Schedule: domain.PlayerSceneScheduleInput{Enabled: true, Time: "07:30", Weekdays: []int{1}},
+	}); !errors.Is(err, ErrScheduleConflict) {
+		t.Fatalf("overlapping scene schedule was accepted: %v", err)
+	}
+	if _, err := manager.createScene(ctx, domain.PlayerSceneInput{
+		Name: "周末清晨", Icon: "relax", URL: "https://media.example/weekend.mp3", Volume: 18,
+		Schedule: domain.PlayerSceneScheduleInput{Enabled: true, Time: "07:30", Weekdays: []int{6, 7}},
+	}); err != nil {
+		t.Fatalf("non-overlapping scene schedule was rejected: %v", err)
+	}
+}
+
+func TestPlaybackManagerRunsScheduledSceneOncePerDeviceMinute(t *testing.T) {
+	runner := &recordingRunner{}
+	volume := 10
+	controller := &fakePlayerController{state: playerTransport{State: "stopped", Volume: &volume}}
+	location := time.FixedZone("CST", 8*60*60)
+	now := time.Date(2026, 7, 27, 7, 30, 10, 0, location)
+	manager := newPlaybackManager(controller, runner, func() time.Time { return now })
+	manager.pollEvery = time.Hour
+	ctx := context.Background()
+
+	scenes, err := manager.createScene(ctx, domain.PlayerSceneInput{
+		Name: "自动早晨", Icon: "morning", Title: "清晨音乐", URL: "https://media.example/morning.mp3?token=private", Volume: 28,
+		Schedule: domain.PlayerSceneScheduleInput{Enabled: true, Time: "07:30", Weekdays: []int{1, 2, 3, 4, 5, 6, 7}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.checkScheduledScenes(ctx)
+	manager.checkScheduledScenes(ctx)
+	if played := controller.playedURLs(); len(played) != 1 || !strings.Contains(played[0], "token=private") {
+		t.Fatalf("scheduled scene did not run exactly once in the minute: %#v", played)
+	}
+
+	var persisted []sceneEntry
+	if err := json.Unmarshal(runner.files[playerScenesPath], &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if len(persisted) != 1 || persisted[0].Schedule.LastTriggeredKey != "2026-07-27@07:30" || persisted[0].Schedule.LastRunOutcome != "succeeded" || persisted[0].Schedule.LastRunAt == nil {
+		t.Fatalf("scheduled run metadata was not persisted: %#v", persisted)
+	}
+	listed := manager.sceneSnapshot()
+	if listed[0].Schedule.NextRunAt == nil || listed[0].Schedule.NextRunAt.Format("2006-01-02 15:04 -0700") != "2026-07-28 07:30 +0800" {
+		t.Fatalf("next scheduled run was not calculated in device time: %#v", listed[0].Schedule)
+	}
+
+	now = now.AddDate(0, 0, 1)
+	manager.checkScheduledScenes(ctx)
+	if played := controller.playedURLs(); len(played) != 2 {
+		t.Fatalf("scheduled scene did not run again on the next day: %#v", played)
+	}
+	if scenes[0].ID == "" {
+		t.Fatal("scene id was not generated")
+	}
+}
+
+func TestParseDeviceTimezoneOffset(t *testing.T) {
+	location, err := parseDeviceTimezoneOffset("offset=+0800\n")
+	if err != nil || time.Unix(0, 0).In(location).Format("-0700") != "+0800" {
+		t.Fatalf("valid timezone offset was not parsed: %v %v", location, err)
+	}
+	if _, err := parseDeviceTimezoneOffset("offset=+2460\n"); err == nil {
+		t.Fatal("invalid timezone offset was accepted")
+	}
+}
+
+func TestPlaybackManagerAppliesSceneAsSerializedPlaybackSettings(t *testing.T) {
+	initialVolume := 12
+	controller := &fakePlayerController{state: playerTransport{State: "stopped", Volume: &initialVolume}}
+	manager := newPlaybackManager(controller, kplayerDiscoveryRunner{}, func() time.Time { return time.UnixMilli(8901) })
+	manager.pollEvery = time.Hour
+	ctx := context.Background()
+	scenes, err := manager.createScene(ctx, domain.PlayerSceneInput{
+		Name: "睡前放松", Icon: "sleep", Title: "睡眠音乐", URL: "https://media.example/sleep.mp3?signature=secret", Volume: 16, TimerMinutes: 30,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	application, err := manager.applyScene(ctx, scenes[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.cancelStopTimer()
+	if application.Player.Transport.Value != "playing" || application.Player.Volume.Value != 16 || !application.Player.StopTimer.Active {
+		t.Fatalf("scene settings were not applied and read back: %#v", application)
+	}
+	if application.Player.Current == nil || application.Player.Current.Title != "睡眠音乐" || strings.Contains(application.Scene.Source, "signature") {
+		t.Fatalf("scene playback response is incomplete or unsafe: %#v", application)
+	}
+	played := controller.playedURLs()
+	if len(played) != 1 || !strings.Contains(played[0], "signature=secret") {
+		t.Fatalf("player did not receive the complete stored URL: %#v", played)
+	}
+}
+
 func TestPlaybackStopTimerStopsAndCanBeCancelled(t *testing.T) {
 	controller := &fakePlayerController{state: playerTransport{State: "playing"}}
 	manager := newPlaybackManager(controller, kplayerDiscoveryRunner{}, time.Now)

@@ -337,6 +337,35 @@ test("普通、警告和危险按钮使用不同颜色并提供轻量兼容性�
 	assert.match(css, /@media \(max-width: 600px\)[\s\S]*grid-template-areas: "preset-label" "presets" "minute-label" "minute"/);
 });
 
+test("场景模式保存在设备并提供创建、预览、应用、编辑和删除流程", async () => {
+	const appSource = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
+	const apiSource = await readFile(new URL("../src/api.js", import.meta.url), "utf8");
+	const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
+	assert.match(appSource, /sectionHeading\("场景模式"/);
+	assert.match(appSource, /场景和自动启动计划保存在音箱本机/);
+	assert.match(appSource, /data-scene-action="create"/);
+	assert.match(appSource, /data-scene-action="apply"/);
+	assert.match(appSource, /openSceneApplyConfirmation/);
+	assert.match(appSource, /替换当前播放 · 音量/);
+	assert.match(appSource, /不填写新地址即可完整保留/);
+	assert.match(appSource, /id="scene-schedule-enabled"/);
+	assert.match(appSource, /data-scene-days="\$\{item\.id\}"/);
+	assert.match(appSource, /name="sceneWeekday"/);
+	assert.match(appSource, /schedule:\s*\{[\s\S]*enabled: scheduleEnabled[\s\S]*weekdays: scheduleWeekdays/);
+	assert.match(appSource, /下次 .*（音箱时间）/);
+	assert.match(appSource, /window\.setInterval\(refreshScenes, 30000\)/);
+	assert.match(apiSource, /scenes\(\)/);
+	assert.match(apiSource, /createScene\(payload\)/);
+	assert.match(apiSource, /updateScene\(id, payload\)/);
+	assert.match(apiSource, /deleteScene\(id\)/);
+	assert.match(apiSource, /applyScene\(id\)/);
+	assert.match(css, /\.scene-grid \{[^}]*grid-template-columns: repeat\(3/s);
+	assert.match(css, /\.scene-schedule-editor \{/);
+	assert.match(css, /\.scene-weekday-picker \{[^}]*repeat\(7/s);
+	assert.match(css, /@media \(max-width: 600px\)[\s\S]*\.scene-grid \{ grid-template-columns: 1fr/);
+	assert.match(css, /@media \(max-width: 600px\)[\s\S]*\.scene-weekday-picker \{ grid-template-columns: repeat\(4/);
+});
+
 test("网页显示应用版本并只上传签名更新包", async () => {
 	const appSource = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
 	const apiSource = await readFile(new URL("../src/api.js", import.meta.url), "utf8");

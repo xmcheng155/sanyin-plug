@@ -605,6 +605,119 @@ func TestPlayerReadContractIncludesProgressQueueAndStations(t *testing.T) {
 	}
 }
 
+func TestSceneReadContractAndMockWriteGuard(t *testing.T) {
+	server := testServer(t)
+	body := getJSON(t, server, api.BasePath+"/scenes")
+	scenes := body["data"].([]any)
+	if len(scenes) != 2 {
+		t.Fatalf("expected mock scene examples, got %#v", scenes)
+	}
+	first := scenes[0].(map[string]any)
+	if first["name"] != "专注阅读" || first["volume"] != float64(24) || first["timerMinutes"] != float64(45) {
+		t.Fatalf("scene contract is incomplete: %#v", first)
+	}
+	request, _ := http.NewRequest(http.MethodPost, server.URL+api.BasePath+"/scenes", strings.NewReader(`{"name":"测试","icon":"music","title":"音乐","url":"https://media.example/test.mp3","volume":20,"timerMinutes":0}`))
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("mock mode accepted scene write: %d", response.StatusCode)
+	}
+}
+
+func TestRealModeManagesAndAppliesPersistentPlayerScenes(t *testing.T) {
+	transport := "STOPPED"
+	volume := 30
+	kplayer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			fmt.Fprint(w, `<?xml version="1.0"?><root><device><serviceList><service><serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType><controlURL>/av/control.xml</controlURL></service><service><serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType><controlURL>/render/control.xml</controlURL></service></serviceList></device></root>`)
+			return
+		}
+		action := strings.Trim(r.Header.Get("SOAPACTION"), `"`)
+		payload, _ := io.ReadAll(r.Body)
+		switch {
+		case strings.HasSuffix(action, "#Play"):
+			transport = "PLAYING"
+		case strings.HasSuffix(action, "#GetTransportInfo"):
+			fmt.Fprintf(w, `<CurrentTransportState>%s</CurrentTransportState>`, transport)
+			return
+		case strings.HasSuffix(action, "#GetPositionInfo"):
+			fmt.Fprint(w, `<TrackDuration>00:03:00</TrackDuration><RelTime>00:00:01</RelTime>`)
+			return
+		case strings.HasSuffix(action, "#SetVolume"):
+			volume, _ = strconv.Atoi(xmlTextForTest(payload, "DesiredVolume"))
+		case strings.HasSuffix(action, "#GetVolume"):
+			fmt.Fprintf(w, `<CurrentVolume>%d</CurrentVolume>`, volume)
+			return
+		}
+		fmt.Fprint(w, `<ok/>`)
+	}))
+	defer kplayer.Close()
+	parsed, _ := url.Parse(kplayer.URL)
+	port, _ := strconv.Atoi(parsed.Port())
+	server := httptest.NewServer(api.NewHandler(adapter.NewRealProviderWithClock(realRunner{playerPort: port}, func() time.Time { return fixedTime })))
+	defer server.Close()
+
+	requestJSON := func(method, path, payload string, expected int) map[string]any {
+		t.Helper()
+		request, _ := http.NewRequest(method, server.URL+api.BasePath+path, strings.NewReader(payload))
+		request.Header.Set("Content-Type", "application/json")
+		response, err := server.Client().Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != expected {
+			body, _ := io.ReadAll(response.Body)
+			t.Fatalf("%s %s returned %d: %s", method, path, response.StatusCode, body)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+
+	created := requestJSON(http.MethodPost, "/scenes", `{"name":"睡前放松","icon":"sleep","title":"睡眠音乐","url":"https://media.example/sleep.mp3?token=private","volume":16,"timerMinutes":30,"schedule":{"enabled":true,"time":"22:30","weekdays":[1,2,3,4,5,6,7]}}`, http.StatusCreated)
+	scenes := created["data"].([]any)
+	if len(scenes) != 1 {
+		t.Fatalf("scene was not created: %#v", created)
+	}
+	scene := scenes[0].(map[string]any)
+	id := scene["id"].(string)
+	if strings.Contains(scene["source"].(string), "token") {
+		t.Fatalf("scene source leaked a private query: %#v", scene)
+	}
+	schedule := scene["schedule"].(map[string]any)
+	if schedule["enabled"] != true || schedule["time"] != "22:30" || schedule["nextRunAt"] == nil {
+		t.Fatalf("scene schedule was not returned with its next run: %#v", schedule)
+	}
+
+	updated := requestJSON(http.MethodPut, "/scenes/"+id, `{"name":"夜间模式","icon":"sleep","title":"睡眠音乐","url":"","volume":14,"timerMinutes":15,"schedule":{"enabled":true,"time":"22:30","weekdays":[1,2,3,4,5,6,7]}}`, http.StatusOK)
+	updatedScene := updated["data"].([]any)[0].(map[string]any)
+	if updatedScene["name"] != "夜间模式" || updatedScene["volume"] != float64(14) {
+		t.Fatalf("scene was not updated while preserving its URL: %#v", updatedScene)
+	}
+	conflict := requestJSON(http.MethodPost, "/scenes", `{"name":"冲突场景","icon":"music","title":"另一首歌","url":"https://media.example/other.mp3","volume":20,"timerMinutes":0,"schedule":{"enabled":true,"time":"22:30","weekdays":[7]}}`, http.StatusConflict)
+	if conflict["error"].(map[string]any)["code"] != "scene_schedule_conflict" {
+		t.Fatalf("schedule conflict did not return a specific error: %#v", conflict)
+	}
+
+	applied := requestJSON(http.MethodPost, "/scenes/"+id+"/apply", "", http.StatusOK)
+	application := applied["data"].(map[string]any)
+	player := application["player"].(map[string]any)
+	if player["transport"].(map[string]any)["value"] != "playing" || player["volume"].(map[string]any)["value"] != float64(14) || player["stopTimer"].(map[string]any)["active"] != true {
+		t.Fatalf("scene was not fully applied: %#v", application)
+	}
+
+	deleted := requestJSON(http.MethodDelete, "/scenes/"+id, "", http.StatusOK)
+	if len(deleted["data"].([]any)) != 0 {
+		t.Fatalf("scene was not deleted: %#v", deleted)
+	}
+}
+
 func TestRealModeControlsKPlayerThroughValidatedPlayerAPI(t *testing.T) {
 	transport := "STOPPED"
 	volume := 30

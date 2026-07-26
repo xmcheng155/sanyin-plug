@@ -40,8 +40,9 @@ export class ApiClient {
   audio() { return this.request("/audio"); }
   bluetooth() { return this.request("/bluetooth"); }
   lighting() { return this.request("/lighting"); }
-  schedules() { return this.request("/schedules"); }
+	schedules() { return this.request("/schedules"); }
 	player() { return this.request("/player"); }
+	scenes() { return this.request("/scenes"); }
 	system() { return this.request("/system"); }
 
 	updateSystem(file) {
@@ -58,6 +59,30 @@ export class ApiClient {
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ action, ...payload }),
 		});
+	}
+
+	createScene(payload) {
+		return this.request("/scenes", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(payload),
+		});
+	}
+
+	updateScene(id, payload) {
+		return this.request(`/scenes/${encodeURIComponent(id)}`, {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(payload),
+		});
+	}
+
+	deleteScene(id) {
+		return this.request(`/scenes/${encodeURIComponent(id)}`, { method: "DELETE" });
+	}
+
+	applyScene(id) {
+		return this.request(`/scenes/${encodeURIComponent(id)}/apply`, { method: "POST" });
 	}
 
   simulateAirplayRecovery() {

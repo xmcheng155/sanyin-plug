@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,7 +23,14 @@ import (
 	"sanyin.local/config/service/internal/domain"
 )
 
-const radioStationsPath = "/mnt/UDISK/sanyin-config/radio-stations.json"
+const (
+	radioStationsPath = "/mnt/UDISK/sanyin-config/radio-stations.json"
+	playerScenesPath  = "/mnt/UDISK/sanyin-config/player-scenes.json"
+	maxPlayerScenes   = 20
+	sceneSchedulePoll = 15 * time.Second
+)
+
+const deviceTimezoneOffsetScript = `printf 'offset=%s\n' "$(date '+%z')"`
 
 const (
 	avTransportService      = "urn:schemas-upnp-org:service:AVTransport:1"
@@ -343,6 +351,26 @@ type radioEntry struct {
 	URL  string `json:"url"`
 }
 
+type sceneEntry struct {
+	ID           string             `json:"id"`
+	Name         string             `json:"name"`
+	Icon         string             `json:"icon"`
+	Title        string             `json:"title"`
+	URL          string             `json:"url"`
+	Volume       int                `json:"volume"`
+	TimerMinutes int                `json:"timerMinutes"`
+	Schedule     sceneScheduleEntry `json:"schedule"`
+}
+
+type sceneScheduleEntry struct {
+	Enabled          bool       `json:"enabled"`
+	Time             string     `json:"time"`
+	Weekdays         []int      `json:"weekdays"`
+	LastTriggeredKey string     `json:"lastTriggeredKey,omitempty"`
+	LastRunAt        *time.Time `json:"lastRunAt,omitempty"`
+	LastRunOutcome   string     `json:"lastRunOutcome,omitempty"`
+}
+
 type playbackManager struct {
 	controller playerController
 	runner     ShellRunner
@@ -350,11 +378,14 @@ type playbackManager struct {
 	pollEvery  time.Duration
 
 	operationMu         sync.Mutex
+	sceneMu             sync.Mutex
 	mu                  sync.Mutex
 	queue               []playerEntry
 	currentIndex        int
 	stations            []radioEntry
 	stationsLoaded      bool
+	scenes              []sceneEntry
+	scenesLoaded        bool
 	last                playerTransport
 	radioTransport      string
 	revision            uint64
@@ -363,10 +394,14 @@ type playbackManager struct {
 	stopAt              time.Time
 	stopTimer           *time.Timer
 	stopTimerGeneration uint64
+	deviceLocationOnce  sync.Once
+	deviceLocation      *time.Location
+	sceneSchedulerOnce  sync.Once
+	sceneScheduleEvery  time.Duration
 }
 
 func newPlaybackManager(controller playerController, runner ShellRunner, now func() time.Time) *playbackManager {
-	return &playbackManager{controller: controller, runner: runner, now: now, pollEvery: time.Second, currentIndex: -1, last: playerTransport{State: "unknown"}}
+	return &playbackManager{controller: controller, runner: runner, now: now, pollEvery: time.Second, sceneScheduleEvery: sceneSchedulePoll, currentIndex: -1, last: playerTransport{State: "unknown"}}
 }
 
 func (m *playbackManager) ensureStationsLoaded(ctx context.Context) {
@@ -418,6 +453,506 @@ func (m *playbackManager) saveStations(ctx context.Context) error {
 		return nil
 	}
 	return err
+}
+
+func normalizeSceneSchedule(input domain.PlayerSceneScheduleInput) (sceneScheduleEntry, error) {
+	value := strings.TrimSpace(input.Time)
+	if value == "" {
+		value = "07:30"
+	}
+	if len(value) != 5 || value[2] != ':' {
+		return sceneScheduleEntry{}, ErrInvalidInput
+	}
+	hour, hourErr := strconv.Atoi(value[:2])
+	minute, minuteErr := strconv.Atoi(value[3:])
+	if hourErr != nil || minuteErr != nil || hour < 0 || hour > 23 || minute < 0 || minute > 59 {
+		return sceneScheduleEntry{}, ErrInvalidInput
+	}
+	weekdays := append([]int(nil), input.Weekdays...)
+	if len(weekdays) == 0 {
+		weekdays = []int{1, 2, 3, 4, 5, 6, 7}
+	}
+	if len(weekdays) > 7 {
+		return sceneScheduleEntry{}, ErrInvalidInput
+	}
+	seen := map[int]bool{}
+	for _, weekday := range weekdays {
+		if weekday < 1 || weekday > 7 || seen[weekday] {
+			return sceneScheduleEntry{}, ErrInvalidInput
+		}
+		seen[weekday] = true
+	}
+	sort.Ints(weekdays)
+	return sceneScheduleEntry{Enabled: input.Enabled, Time: value, Weekdays: weekdays}, nil
+}
+
+func sameSceneSchedule(left, right sceneScheduleEntry) bool {
+	if left.Enabled != right.Enabled || left.Time != right.Time || len(left.Weekdays) != len(right.Weekdays) {
+		return false
+	}
+	for index := range left.Weekdays {
+		if left.Weekdays[index] != right.Weekdays[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func sceneSchedulesOverlap(left, right sceneScheduleEntry) bool {
+	if !left.Enabled || !right.Enabled || left.Time != right.Time {
+		return false
+	}
+	rightDays := map[int]bool{}
+	for _, weekday := range right.Weekdays {
+		rightDays[weekday] = true
+	}
+	for _, weekday := range left.Weekdays {
+		if rightDays[weekday] {
+			return true
+		}
+	}
+	return false
+}
+
+func sceneScheduleConflicts(schedule sceneScheduleEntry, scenes []sceneEntry, ignoredID string) bool {
+	for _, scene := range scenes {
+		if scene.ID != ignoredID && sceneSchedulesOverlap(schedule, scene.Schedule) {
+			return true
+		}
+	}
+	return false
+}
+
+func isoWeekday(value time.Weekday) int {
+	if value == time.Sunday {
+		return 7
+	}
+	return int(value)
+}
+
+func scheduleIncludesWeekday(schedule sceneScheduleEntry, weekday int) bool {
+	for _, candidate := range schedule.Weekdays {
+		if candidate == weekday {
+			return true
+		}
+	}
+	return false
+}
+
+func sceneTriggerKey(now time.Time, schedule sceneScheduleEntry) string {
+	return now.Format("2006-01-02") + "@" + schedule.Time
+}
+
+func nextSceneRun(schedule sceneScheduleEntry, now time.Time) *time.Time {
+	if !schedule.Enabled || len(schedule.Time) != 5 {
+		return nil
+	}
+	hour, hourErr := strconv.Atoi(schedule.Time[:2])
+	minute, minuteErr := strconv.Atoi(schedule.Time[3:])
+	if hourErr != nil || minuteErr != nil {
+		return nil
+	}
+	for daysAhead := 0; daysAhead <= 7; daysAhead++ {
+		date := now.AddDate(0, 0, daysAhead)
+		candidate := time.Date(date.Year(), date.Month(), date.Day(), hour, minute, 0, 0, now.Location())
+		if scheduleIncludesWeekday(schedule, isoWeekday(candidate.Weekday())) && candidate.After(now) {
+			copy := candidate
+			return &copy
+		}
+	}
+	return nil
+}
+
+func parseDeviceTimezoneOffset(output string) (*time.Location, error) {
+	value := strings.TrimSpace(parseKeyValues(output)["offset"])
+	if len(value) != 5 || (value[0] != '+' && value[0] != '-') {
+		return nil, errors.New("invalid device timezone offset")
+	}
+	hours, hourErr := strconv.Atoi(value[1:3])
+	minutes, minuteErr := strconv.Atoi(value[3:5])
+	if hourErr != nil || minuteErr != nil || hours > 14 || minutes > 59 || (hours == 14 && minutes != 0) {
+		return nil, errors.New("invalid device timezone offset")
+	}
+	offset := (hours*60 + minutes) * 60
+	if value[0] == '-' {
+		offset = -offset
+	}
+	return time.FixedZone("UTC"+value[:3]+":"+value[3:], offset), nil
+}
+
+func (m *playbackManager) ensureDeviceLocation(ctx context.Context) {
+	m.deviceLocationOnce.Do(func() {
+		m.deviceLocation = m.now().Location()
+		if output, err := m.runner.Run(ctx, deviceTimezoneOffsetScript); err == nil {
+			if location, parseErr := parseDeviceTimezoneOffset(output); parseErr == nil {
+				m.deviceLocation = location
+			}
+		}
+	})
+}
+
+func (m *playbackManager) sceneNow() time.Time {
+	location := m.deviceLocation
+	if location == nil {
+		location = m.now().Location()
+	}
+	return m.now().In(location)
+}
+
+func cloneSceneEntries(entries []sceneEntry) []sceneEntry {
+	result := make([]sceneEntry, len(entries))
+	copy(result, entries)
+	for index := range result {
+		result[index].Schedule.Weekdays = append([]int(nil), entries[index].Schedule.Weekdays...)
+	}
+	return result
+}
+
+func (m *playbackManager) checkScheduledScenes(ctx context.Context) {
+	m.ensureScenesLoaded(ctx)
+	now := m.sceneNow()
+	due := make([]struct {
+		id  string
+		key string
+	}, 0, 1)
+
+	m.sceneMu.Lock()
+	m.mu.Lock()
+	previous := cloneSceneEntries(m.scenes)
+	for index := range m.scenes {
+		schedule := &m.scenes[index].Schedule
+		if !schedule.Enabled || schedule.Time != now.Format("15:04") || !scheduleIncludesWeekday(*schedule, isoWeekday(now.Weekday())) {
+			continue
+		}
+		key := sceneTriggerKey(now, *schedule)
+		if schedule.LastTriggeredKey == key {
+			continue
+		}
+		observedAt := now
+		schedule.LastTriggeredKey = key
+		schedule.LastRunAt = &observedAt
+		schedule.LastRunOutcome = "running"
+		due = append(due, struct {
+			id  string
+			key string
+		}{id: m.scenes[index].ID, key: key})
+	}
+	m.mu.Unlock()
+	if len(due) == 0 {
+		m.sceneMu.Unlock()
+		return
+	}
+	if err := m.saveScenes(ctx); err != nil {
+		m.mu.Lock()
+		m.scenes = previous
+		m.mu.Unlock()
+		m.sceneMu.Unlock()
+		return
+	}
+	m.sceneMu.Unlock()
+
+	for _, scheduled := range due {
+		applyCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		_, err := m.applyScene(applyCtx, scheduled.id)
+		cancel()
+		outcome := "succeeded"
+		if err != nil {
+			outcome = "failed"
+		}
+		m.sceneMu.Lock()
+		m.mu.Lock()
+		for index := range m.scenes {
+			if m.scenes[index].ID == scheduled.id && m.scenes[index].Schedule.LastTriggeredKey == scheduled.key {
+				m.scenes[index].Schedule.LastRunOutcome = outcome
+				break
+			}
+		}
+		m.mu.Unlock()
+		saveCtx, saveCancel := context.WithTimeout(context.Background(), 8*time.Second)
+		_ = m.saveScenes(saveCtx)
+		saveCancel()
+		m.sceneMu.Unlock()
+	}
+}
+
+func (m *playbackManager) startSceneScheduler() {
+	m.sceneSchedulerOnce.Do(func() {
+		go func() {
+			check := func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+				defer cancel()
+				m.checkScheduledScenes(ctx)
+			}
+			check()
+			ticker := time.NewTicker(m.sceneScheduleEvery)
+			defer ticker.Stop()
+			for range ticker.C {
+				check()
+			}
+		}()
+	})
+}
+
+func normalizeSceneInput(input domain.PlayerSceneInput) (sceneEntry, error) {
+	name := strings.TrimSpace(input.Name)
+	if name == "" || !utf8.ValidString(name) || utf8.RuneCountInString(name) > 40 || input.Volume < 0 || input.Volume > 100 || input.TimerMinutes < 0 || input.TimerMinutes > 60 {
+		return sceneEntry{}, ErrInvalidInput
+	}
+	mediaURL, err := validateMediaURL(input.URL)
+	if err != nil {
+		return sceneEntry{}, err
+	}
+	title, err := mediaTitle(input.Title, mediaURL)
+	if err != nil {
+		return sceneEntry{}, err
+	}
+	icon := strings.TrimSpace(input.Icon)
+	if icon == "" {
+		icon = "music"
+	}
+	validIcons := map[string]bool{"music": true, "morning": true, "focus": true, "relax": true, "party": true, "sleep": true}
+	if !validIcons[icon] {
+		return sceneEntry{}, ErrInvalidInput
+	}
+	schedule, err := normalizeSceneSchedule(input.Schedule)
+	if err != nil {
+		return sceneEntry{}, err
+	}
+	return sceneEntry{Name: name, Icon: icon, Title: title, URL: mediaURL, Volume: input.Volume, TimerMinutes: input.TimerMinutes, Schedule: schedule}, nil
+}
+
+func (m *playbackManager) ensureScenesLoaded(ctx context.Context) {
+	m.ensureDeviceLocation(ctx)
+	m.mu.Lock()
+	if m.scenesLoaded {
+		m.mu.Unlock()
+		return
+	}
+	m.scenesLoaded = true
+	m.mu.Unlock()
+	reader, ok := m.runner.(interface {
+		ReadDeviceFile(context.Context, string) ([]byte, error)
+	})
+	if !ok {
+		return
+	}
+	content, err := reader.ReadDeviceFile(ctx, playerScenesPath)
+	if err != nil {
+		return
+	}
+	var stored []sceneEntry
+	if json.Unmarshal(content, &stored) != nil || len(stored) > maxPlayerScenes {
+		return
+	}
+	valid := make([]sceneEntry, 0, len(stored))
+	ids := map[string]bool{}
+	for _, entry := range stored {
+		normalized, validationErr := normalizeSceneInput(domain.PlayerSceneInput{Name: entry.Name, Icon: entry.Icon, Title: entry.Title, URL: entry.URL, Volume: entry.Volume, TimerMinutes: entry.TimerMinutes, Schedule: domain.PlayerSceneScheduleInput{Enabled: entry.Schedule.Enabled, Time: entry.Schedule.Time, Weekdays: entry.Schedule.Weekdays}})
+		if validationErr != nil || entry.ID == "" || ids[entry.ID] {
+			continue
+		}
+		normalized.ID = entry.ID
+		normalized.Schedule.LastTriggeredKey = entry.Schedule.LastTriggeredKey
+		normalized.Schedule.LastRunAt = entry.Schedule.LastRunAt
+		normalized.Schedule.LastRunOutcome = entry.Schedule.LastRunOutcome
+		ids[entry.ID] = true
+		valid = append(valid, normalized)
+	}
+	m.mu.Lock()
+	m.scenes = valid
+	m.mu.Unlock()
+}
+
+func (m *playbackManager) saveScenes(ctx context.Context) error {
+	store, ok := m.runner.(deviceFileStore)
+	if !ok {
+		return nil
+	}
+	m.mu.Lock()
+	content, err := json.Marshal(m.scenes)
+	m.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	err = store.WriteDeviceFile(ctx, playerScenesPath, append(content, '\n'), 0600)
+	if errors.Is(err, ErrCapabilityNotReady) {
+		return nil
+	}
+	return err
+}
+
+func (m *playbackManager) publicScene(entry sceneEntry, now time.Time) domain.PlayerScene {
+	schedule := domain.PlayerSceneSchedule{
+		Enabled:        entry.Schedule.Enabled,
+		Time:           entry.Schedule.Time,
+		Weekdays:       append([]int(nil), entry.Schedule.Weekdays...),
+		LastRunAt:      entry.Schedule.LastRunAt,
+		LastRunOutcome: entry.Schedule.LastRunOutcome,
+	}
+	schedule.NextRunAt = nextSceneRun(entry.Schedule, now)
+	return domain.PlayerScene{ID: entry.ID, Name: entry.Name, Icon: entry.Icon, Title: entry.Title, Source: publicSource(entry.URL), Volume: entry.Volume, TimerMinutes: entry.TimerMinutes, Schedule: schedule}
+}
+
+func (m *playbackManager) sceneSnapshot() []domain.PlayerScene {
+	now := m.sceneNow()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := make([]domain.PlayerScene, len(m.scenes))
+	for index, entry := range m.scenes {
+		result[index] = m.publicScene(entry, now)
+	}
+	return result
+}
+
+func (m *playbackManager) listScenes(ctx context.Context) ([]domain.PlayerScene, error) {
+	m.ensureScenesLoaded(ctx)
+	return m.sceneSnapshot(), nil
+}
+
+func (m *playbackManager) createScene(ctx context.Context, input domain.PlayerSceneInput) ([]domain.PlayerScene, error) {
+	m.ensureScenesLoaded(ctx)
+	m.sceneMu.Lock()
+	defer m.sceneMu.Unlock()
+	entry, err := normalizeSceneInput(input)
+	if err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	if len(m.scenes) >= maxPlayerScenes {
+		m.mu.Unlock()
+		return nil, ErrConflict
+	}
+	if sceneScheduleConflicts(entry.Schedule, m.scenes, "") {
+		m.mu.Unlock()
+		return nil, ErrScheduleConflict
+	}
+	entry.ID = m.nextID("scene")
+	previous := append([]sceneEntry(nil), m.scenes...)
+	m.scenes = append(m.scenes, entry)
+	m.mu.Unlock()
+	if err := m.saveScenes(ctx); err != nil {
+		m.mu.Lock()
+		m.scenes = previous
+		m.mu.Unlock()
+		return nil, err
+	}
+	return m.sceneSnapshot(), nil
+}
+
+func (m *playbackManager) updateScene(ctx context.Context, id string, input domain.PlayerSceneInput) ([]domain.PlayerScene, error) {
+	m.ensureScenesLoaded(ctx)
+	m.sceneMu.Lock()
+	defer m.sceneMu.Unlock()
+	m.mu.Lock()
+	index := -1
+	for candidate := range m.scenes {
+		if m.scenes[candidate].ID == id {
+			index = candidate
+			break
+		}
+	}
+	if index < 0 {
+		m.mu.Unlock()
+		return nil, ErrNotFound
+	}
+	if strings.TrimSpace(input.URL) == "" {
+		input.URL = m.scenes[index].URL
+	}
+	entry, err := normalizeSceneInput(input)
+	if err != nil {
+		m.mu.Unlock()
+		return nil, err
+	}
+	if sceneScheduleConflicts(entry.Schedule, m.scenes, id) {
+		m.mu.Unlock()
+		return nil, ErrScheduleConflict
+	}
+	previous := append([]sceneEntry(nil), m.scenes...)
+	entry.ID = id
+	if sameSceneSchedule(entry.Schedule, m.scenes[index].Schedule) {
+		entry.Schedule.LastTriggeredKey = m.scenes[index].Schedule.LastTriggeredKey
+		entry.Schedule.LastRunAt = m.scenes[index].Schedule.LastRunAt
+		entry.Schedule.LastRunOutcome = m.scenes[index].Schedule.LastRunOutcome
+	}
+	m.scenes[index] = entry
+	m.mu.Unlock()
+	if err := m.saveScenes(ctx); err != nil {
+		m.mu.Lock()
+		m.scenes = previous
+		m.mu.Unlock()
+		return nil, err
+	}
+	return m.sceneSnapshot(), nil
+}
+
+func (m *playbackManager) deleteScene(ctx context.Context, id string) ([]domain.PlayerScene, error) {
+	m.ensureScenesLoaded(ctx)
+	m.sceneMu.Lock()
+	defer m.sceneMu.Unlock()
+	m.mu.Lock()
+	index := -1
+	for candidate := range m.scenes {
+		if m.scenes[candidate].ID == id {
+			index = candidate
+			break
+		}
+	}
+	if index < 0 {
+		m.mu.Unlock()
+		return nil, ErrNotFound
+	}
+	previous := append([]sceneEntry(nil), m.scenes...)
+	m.scenes = append(m.scenes[:index], m.scenes[index+1:]...)
+	m.mu.Unlock()
+	if err := m.saveScenes(ctx); err != nil {
+		m.mu.Lock()
+		m.scenes = previous
+		m.mu.Unlock()
+		return nil, err
+	}
+	return m.sceneSnapshot(), nil
+}
+
+func (m *playbackManager) applyScene(ctx context.Context, id string) (domain.PlayerSceneApplication, error) {
+	m.ensureScenesLoaded(ctx)
+	m.mu.Lock()
+	var selected *sceneEntry
+	for index := range m.scenes {
+		if m.scenes[index].ID == id {
+			copy := m.scenes[index]
+			selected = &copy
+			break
+		}
+	}
+	m.mu.Unlock()
+	if selected == nil {
+		return domain.PlayerSceneApplication{}, ErrNotFound
+	}
+
+	m.operationMu.Lock()
+	defer m.operationMu.Unlock()
+	m.mu.Lock()
+	m.queue = []playerEntry{{ID: m.nextID("media"), Title: selected.Title, URL: selected.URL, Kind: "scene"}}
+	m.currentIndex = 0
+	m.mu.Unlock()
+	if err := m.playIndex(ctx, 0); err != nil {
+		return domain.PlayerSceneApplication{}, err
+	}
+	if err := m.setAndWaitForVolume(ctx, selected.Volume); err != nil {
+		return domain.PlayerSceneApplication{}, err
+	}
+	if selected.TimerMinutes > 0 {
+		if err := m.scheduleStop(time.Duration(selected.TimerMinutes) * time.Minute); err != nil {
+			return domain.PlayerSceneApplication{}, err
+		}
+	} else {
+		m.cancelStopTimer()
+	}
+	player, err := m.statusLocked(ctx)
+	if err != nil {
+		return domain.PlayerSceneApplication{}, err
+	}
+	return domain.PlayerSceneApplication{Scene: m.publicScene(*selected, m.sceneNow()), Player: player}, nil
 }
 
 func validateMediaURL(raw string) (string, error) {
@@ -706,7 +1241,7 @@ func (m *playbackManager) playIndex(ctx context.Context, index int) error {
 		return err
 	}
 	waitTimeout := 4 * time.Second
-	if entry.Kind == "radio" {
+	if entry.Kind == "radio" || entry.Kind == "scene" {
 		waitTimeout = 12 * time.Second
 	}
 	if err := m.waitForTimeout(ctx, "playing", waitTimeout); err != nil {

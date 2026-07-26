@@ -191,6 +191,13 @@ func (p *RealProvider) Environment() string {
 	return "device"
 }
 
+// StartBackgroundTasks is called by the executable after the provider has
+// completed its startup probes. Keeping lifecycle start explicit avoids
+// surprising goroutines for API consumers that only construct a provider.
+func (p *RealProvider) StartBackgroundTasks() {
+	p.device.playback.startSceneScheduler()
+}
+
 func (p *RealProvider) DefaultScenario() string {
 	return LiveScenario
 }
@@ -571,6 +578,41 @@ func (m *RealAdapter) ControlPlayer(ctx context.Context, command domain.PlayerCo
 		return domain.Player{}, ErrCapabilityNotReady
 	}
 	return m.playback.control(ctx, command)
+}
+
+func (m *RealAdapter) PlayerScenes(ctx context.Context) ([]domain.PlayerScene, error) {
+	if m.playback == nil {
+		return nil, ErrCapabilityNotReady
+	}
+	return m.playback.listScenes(ctx)
+}
+
+func (m *RealAdapter) CreatePlayerScene(ctx context.Context, input domain.PlayerSceneInput) ([]domain.PlayerScene, error) {
+	if m.playback == nil {
+		return nil, ErrCapabilityNotReady
+	}
+	return m.playback.createScene(ctx, input)
+}
+
+func (m *RealAdapter) UpdatePlayerScene(ctx context.Context, id string, input domain.PlayerSceneInput) ([]domain.PlayerScene, error) {
+	if m.playback == nil {
+		return nil, ErrCapabilityNotReady
+	}
+	return m.playback.updateScene(ctx, id, input)
+}
+
+func (m *RealAdapter) DeletePlayerScene(ctx context.Context, id string) ([]domain.PlayerScene, error) {
+	if m.playback == nil {
+		return nil, ErrCapabilityNotReady
+	}
+	return m.playback.deleteScene(ctx, id)
+}
+
+func (m *RealAdapter) ApplyPlayerScene(ctx context.Context, id string) (domain.PlayerSceneApplication, error) {
+	if m.playback == nil {
+		return domain.PlayerSceneApplication{}, ErrCapabilityNotReady
+	}
+	return m.playback.applyScene(ctx, id)
 }
 
 func (m *RealAdapter) Event(ctx context.Context) (domain.Event, error) {

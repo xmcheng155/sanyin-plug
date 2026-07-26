@@ -218,6 +218,94 @@ h1:focus { outline: none; }
 .eq-box strong { display: block; margin-top: 12px; font-size: 20px; }
 .eq-arrow { display: grid; place-items: center; color: var(--amber); font-size: 22px; }
 
+.scene-panel { overflow: hidden; }
+.scene-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 18px; }
+.scene-toolbar strong, .scene-toolbar span { display: block; }
+.scene-toolbar strong { font-size: 14px; }
+.scene-toolbar span { margin-top: 5px; color: var(--ink-soft); font-size: 11px; }
+.scene-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.scene-card { min-width: 0; display: grid; grid-template-rows: auto auto auto minmax(90px, 1fr) auto; gap: 13px; padding: 16px; border: 1px solid var(--line); border-radius: 17px; background: linear-gradient(145deg, #fff 0%, var(--surface-subtle) 100%); }
+.scene-card-header { min-width: 0; display: grid; grid-template-columns: 46px minmax(0, 1fr) auto; align-items: center; gap: 11px; }
+.scene-card-icon { width: 46px; height: 46px; border-radius: 14px; display: grid; place-items: center; color: var(--primary-deep); background: var(--primary-soft); }
+.scene-card-icon .ui-icon { width: 23px; height: 23px; }
+.scene-tone-morning .scene-card-icon { color: #94631b; background: #fff0cd; }
+.scene-tone-focus .scene-card-icon { color: #315d87; background: #e1edf7; }
+.scene-tone-relax .scene-card-icon { color: #31704c; background: #dff0e7; }
+.scene-tone-party .scene-card-icon { color: #8c4774; background: #f4e2ef; }
+.scene-tone-sleep .scene-card-icon { color: #5b568b; background: #e9e7f7; }
+.scene-card-title { min-width: 0; }
+.scene-card-title strong, .scene-card-title small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scene-card-title strong { font-size: 14px; }
+.scene-card-title small { margin-top: 5px; color: var(--ink-soft); font-size: 11px; }
+.scene-card-tools { display: flex; gap: 5px; }
+.scene-source { margin: 0; overflow: hidden; color: var(--ink-soft); font-size: 10px; line-height: 1.5; text-overflow: ellipsis; white-space: nowrap; }
+.scene-settings { display: flex; flex-wrap: wrap; gap: 7px; }
+.scene-settings span { padding: 5px 8px; border: 1px solid var(--line); border-radius: 99px; background: rgba(255,255,255,.72); color: var(--ink-soft); font-size: 10px; font-weight: 700; }
+.scene-schedule-status { min-width: 0; display: grid; grid-template-columns: 30px minmax(0, 1fr); align-items: start; gap: 9px; padding: 10px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.72); }
+.scene-schedule-status.is-scheduled { border-color: #c5dce8; background: #f2f8fb; }
+.scene-schedule-icon { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 9px; color: var(--ink-soft); background: var(--surface-subtle); }
+.scene-schedule-status.is-scheduled .scene-schedule-icon { color: var(--primary-deep); background: var(--primary-soft); }
+.scene-schedule-icon .ui-icon { width: 17px; height: 17px; }
+.scene-schedule-status strong, .scene-schedule-status small { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scene-schedule-status strong { color: var(--ink); font-size: 11px; }
+.scene-schedule-status small { margin-top: 4px; color: var(--ink-soft); font-size: 9px; }
+.scene-apply-button { width: 100%; align-self: end; }
+.scene-empty { grid-column: 1 / -1; min-height: 230px; display: grid; justify-items: center; align-content: center; gap: 10px; }
+.scene-empty strong { color: var(--ink); font-size: 15px; }
+.scene-empty p { max-width: 380px; margin: 0 0 5px; line-height: 1.6; }
+.scene-empty-icon { width: 54px; height: 54px; border-radius: 17px; display: grid; place-items: center; color: var(--primary); background: var(--primary-soft); }
+.scene-empty-icon .ui-icon { width: 26px; height: 26px; }
+.scene-editor { margin-top: 18px; }
+.scene-editor > .field-label:first-child { margin-top: 0; }
+.scene-icon-picker { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 7px; }
+.scene-icon-option { cursor: pointer; }
+.scene-icon-option input { position: absolute; opacity: 0; pointer-events: none; }
+.scene-icon-option > span { min-height: 58px; display: grid; place-items: center; align-content: center; gap: 4px; border: 1px solid var(--line); border-radius: 12px; color: var(--ink-soft); background: var(--surface-subtle); }
+.scene-icon-option .ui-icon { width: 20px; height: 20px; }
+.scene-icon-option small { font-size: 9px; }
+.scene-icon-option input:checked + span { border-color: var(--primary); color: var(--primary-deep); background: var(--primary-soft); box-shadow: 0 0 0 2px var(--primary-soft); }
+.scene-icon-option input:focus-visible + span { outline: 2px solid var(--primary); outline-offset: 2px; }
+.saved-scene-source { margin-top: 9px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface-subtle); }
+.saved-scene-source span, .saved-scene-source strong, .saved-scene-source small { display: block; }
+.saved-scene-source span, .saved-scene-source small { color: var(--ink-soft); font-size: 10px; }
+.saved-scene-source strong { margin: 4px 0; overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.scene-editor-row { display: grid; grid-template-columns: minmax(0, 1fr) 140px; gap: 16px; }
+.scene-volume-input { width: 100%; accent-color: var(--primary); }
+#scene-volume-value { float: right; color: var(--primary-deep); font-variant-numeric: tabular-nums; }
+.scene-timer-input { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; }
+.scene-timer-input span { color: var(--ink-soft); font-size: 11px; }
+.scene-editor-hint { margin: 6px 0 0; color: var(--ink-soft); font-size: 10px; line-height: 1.5; }
+.scene-schedule-editor { margin-top: 18px; padding: 15px; border: 1px solid #c5dce8; border-radius: 14px; background: #f6fafc; transition: border-color .15s, background .15s; }
+.scene-schedule-editor.is-disabled { border-color: var(--line); background: var(--surface-subtle); }
+.scene-schedule-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.scene-schedule-heading strong, .scene-schedule-heading span { display: block; }
+.scene-schedule-heading strong { font-size: 13px; }
+.scene-schedule-heading span { margin-top: 4px; color: var(--ink-soft); font-size: 10px; line-height: 1.45; }
+.scene-schedule-switch { flex: 0 0 auto; min-height: 44px; display: flex; align-items: center; gap: 7px; cursor: pointer; }
+.scene-schedule-switch input { position: absolute; opacity: 0; pointer-events: none; }
+.scene-schedule-switch > span { position: relative; width: 42px; height: 24px; border-radius: 99px; background: #cbd0cc; transition: background .15s; }
+.scene-schedule-switch > span::after { content: ""; position: absolute; width: 18px; height: 18px; left: 3px; top: 3px; border-radius: 50%; background: #fff; box-shadow: 0 1px 4px rgba(20,35,28,.22); transition: transform .15s; }
+.scene-schedule-switch input:checked + span { background: var(--primary); }
+.scene-schedule-switch input:checked + span::after { transform: translateX(18px); }
+.scene-schedule-switch input:focus-visible + span { outline: 2px solid var(--primary); outline-offset: 2px; }
+.scene-schedule-switch small { min-width: 36px; color: var(--ink-soft); font-size: 10px; }
+.scene-schedule-fields { display: grid; grid-template-columns: 128px minmax(0, 1fr); gap: 13px; margin-top: 4px; }
+.scene-schedule-fields .field-label { margin-top: 12px; }
+.scene-schedule-fields input[type="time"] { font-variant-numeric: tabular-nums; }
+.scene-day-presets { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.scene-day-presets .button { min-width: 0; padding: 7px 8px; }
+.scene-weekday-picker { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 5px; margin-top: 11px; }
+.scene-weekday-picker label { cursor: pointer; }
+.scene-weekday-picker input { position: absolute; opacity: 0; pointer-events: none; }
+.scene-weekday-picker span { min-height: 38px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 9px; background: #fff; color: var(--ink-soft); font-size: 10px; font-weight: 700; }
+.scene-weekday-picker input:checked + span { border-color: var(--primary); color: var(--primary-deep); background: var(--primary-soft); }
+.scene-weekday-picker input:focus-visible + span { outline: 2px solid var(--primary); outline-offset: 2px; }
+.scene-schedule-editor.is-disabled .scene-schedule-fields, .scene-schedule-editor.is-disabled .scene-weekday-picker { opacity: .48; }
+.scene-schedule-editor input:disabled + span, .scene-schedule-editor button:disabled { cursor: not-allowed; }
+.scene-apply-preview { display: grid; grid-template-columns: 46px minmax(0, 1fr); align-items: center; gap: 12px; margin-top: 18px; padding: 13px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface-subtle); }
+.scene-apply-preview strong, .scene-apply-preview small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scene-apply-preview small { margin-top: 5px; color: var(--ink-soft); font-size: 10px; }
+
 .player-now { overflow: hidden; background: linear-gradient(145deg, #fff 0%, #faf6f2 100%); }
 .now-playing-copy { display: flex; align-items: center; gap: 15px; min-height: 72px; margin-bottom: 18px; }
 .now-playing-icon { flex: 0 0 50px; height: 50px; border-radius: 16px; background: var(--accent-soft); color: var(--accent); display: grid; place-items: center; font-size: 21px; }
@@ -333,7 +421,7 @@ h1:focus { outline: none; }
 .skeleton-grid { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 14px; }
 .skeleton-card { height: 140px; }
 
-.operation-dialog { border: 0; padding: 0; width: min(92vw, 500px); border-radius: 22px; background: transparent; box-shadow: 0 30px 80px rgba(11,29,21,.25); }
+.operation-dialog { border: 0; padding: 0; width: min(92vw, 500px); max-height: calc(100dvh - 24px); overflow: auto; border-radius: 22px; background: transparent; box-shadow: 0 30px 80px rgba(11,29,21,.25); }
 .operation-dialog::backdrop { background: rgba(15,29,23,.52); backdrop-filter: blur(4px); }
 .dialog-card { position: relative; border-radius: 22px; background: var(--surface); padding: 28px; }
 .dialog-close { position: absolute; right: 16px; top: 14px; width: 32px; height: 32px; border: 0; background: var(--surface-subtle); border-radius: 50%; font-size: 19px; cursor: pointer; }
@@ -374,6 +462,7 @@ h1:focus { outline: none; }
 @media (max-width: 1080px) {
   .card-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .card-grid.three { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .scene-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .media-form, .station-form { grid-template-columns: minmax(0, 1fr) minmax(180px, .42fr); grid-template-areas: "primary-label secondary-label" "primary-control secondary-control" "primary-feedback secondary-feedback" "action-label action-label" "actions actions" "action-hints action-hints" "form-error form-error"; }
   .media-form-actions, .media-action-hints { grid-auto-columns: minmax(112px, 180px); justify-content: start; }
   .stop-timer { grid-template-columns: 1fr; align-items: stretch; gap: 13px; }
@@ -470,6 +559,15 @@ h1:focus { outline: none; }
 }
 
 @media (max-width: 600px) {
+  .scene-toolbar { align-items: stretch; flex-direction: column; }
+  .scene-toolbar .button { width: 100%; }
+  .scene-grid { grid-template-columns: 1fr; }
+  .scene-editor-row { grid-template-columns: 1fr; gap: 0; }
+  .scene-icon-picker { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .scene-schedule-heading { align-items: flex-start; }
+  .scene-schedule-fields { grid-template-columns: 1fr; gap: 0; }
+  .scene-weekday-picker { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .scene-weekday-picker span { min-height: 44px; }
   .url-input-group { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .url-input-group .text-input { grid-column: 1 / -1; }
   .media-form-actions, .media-action-hints { grid-auto-flow: row; grid-auto-columns: 1fr; grid-template-columns: 1fr; }

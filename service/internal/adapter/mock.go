@@ -240,6 +240,29 @@ func (m *MockAdapter) ControlPlayer(_ context.Context, _ domain.PlayerCommand) (
 	return domain.Player{}, errors.New("real KPlayer control is unavailable in mock mode")
 }
 
+func (m *MockAdapter) PlayerScenes(_ context.Context) ([]domain.PlayerScene, error) {
+	return []domain.PlayerScene{
+		{ID: "mock-scene-focus", Name: "专注阅读", Icon: "focus", Title: "局域网音乐示例", Source: "http://media.example/music.mp3", Volume: 24, TimerMinutes: 45, Schedule: domain.PlayerSceneSchedule{Enabled: false, Time: "07:30", Weekdays: []int{1, 2, 3, 4, 5, 6, 7}}},
+		{ID: "mock-scene-morning", Name: "清晨电台", Icon: "morning", Title: "网络电台示例", Source: "https://radio.example/live.mp3", Volume: 32, TimerMinutes: 0, Schedule: domain.PlayerSceneSchedule{Enabled: true, Time: "07:30", Weekdays: []int{1, 2, 3, 4, 5}}},
+	}, nil
+}
+
+func (m *MockAdapter) CreatePlayerScene(_ context.Context, _ domain.PlayerSceneInput) ([]domain.PlayerScene, error) {
+	return nil, errors.New("real scene configuration is unavailable in mock mode")
+}
+
+func (m *MockAdapter) UpdatePlayerScene(_ context.Context, _ string, _ domain.PlayerSceneInput) ([]domain.PlayerScene, error) {
+	return nil, errors.New("real scene configuration is unavailable in mock mode")
+}
+
+func (m *MockAdapter) DeletePlayerScene(_ context.Context, _ string) ([]domain.PlayerScene, error) {
+	return nil, errors.New("real scene configuration is unavailable in mock mode")
+}
+
+func (m *MockAdapter) ApplyPlayerScene(_ context.Context, _ string) (domain.PlayerSceneApplication, error) {
+	return domain.PlayerSceneApplication{}, errors.New("real scene configuration is unavailable in mock mode")
+}
+
 func (m *MockAdapter) Event(_ context.Context) (domain.Event, error) {
 	return domain.Event{Type: "snapshot", Scenario: m.scenario, ObservedAt: m.observedAt(), Source: domain.SourceMock, Revision: m.revision, Changes: []string{"status", "airplay", "network", "audio", "bluetooth", "player"}}, nil
 }

@@ -301,6 +301,62 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if path == BasePath+"/scenes" && r.Method == http.MethodPost {
+		if h.provider.Environment() == "mock" {
+			h.notReady(w)
+			return
+		}
+		input, ok := h.readPlayerSceneInput(w, r)
+		if !ok {
+			return
+		}
+		scenes, err := device.CreatePlayerScene(r.Context(), input)
+		if h.writePlayerSceneError(w, err) {
+			return
+		}
+		h.writeJSON(w, http.StatusCreated, domain.Envelope[[]domain.PlayerScene]{Environment: h.provider.Environment(), Scenario: scenario, Data: scenes})
+		return
+	}
+
+	if strings.HasPrefix(path, BasePath+"/scenes/") {
+		relative := strings.TrimPrefix(path, BasePath+"/scenes/")
+		parts := strings.Split(relative, "/")
+		if len(parts) == 1 && parts[0] != "" && (r.Method == http.MethodPut || r.Method == http.MethodDelete) {
+			if h.provider.Environment() == "mock" {
+				h.notReady(w)
+				return
+			}
+			var scenes []domain.PlayerScene
+			var err error
+			if r.Method == http.MethodPut {
+				input, ok := h.readPlayerSceneInput(w, r)
+				if !ok {
+					return
+				}
+				scenes, err = device.UpdatePlayerScene(r.Context(), parts[0], input)
+			} else {
+				scenes, err = device.DeletePlayerScene(r.Context(), parts[0])
+			}
+			if h.writePlayerSceneError(w, err) {
+				return
+			}
+			h.writeJSON(w, http.StatusOK, domain.Envelope[[]domain.PlayerScene]{Environment: h.provider.Environment(), Scenario: scenario, Data: scenes})
+			return
+		}
+		if len(parts) == 2 && parts[0] != "" && parts[1] == "apply" && r.Method == http.MethodPost {
+			if h.provider.Environment() == "mock" {
+				h.notReady(w)
+				return
+			}
+			application, err := device.ApplyPlayerScene(r.Context(), parts[0])
+			if h.writePlayerSceneError(w, err) {
+				return
+			}
+			h.writeJSON(w, http.StatusOK, domain.Envelope[domain.PlayerSceneApplication]{Environment: h.provider.Environment(), Scenario: scenario, Data: application})
+			return
+		}
+	}
+
 	if isReservedWrite(path, r.Method) {
 		h.notReady(w)
 		return
@@ -367,6 +423,42 @@ func validPlayerCommand(command domain.PlayerCommand) bool {
 	}
 }
 
+func (h *Handler) readPlayerSceneInput(w http.ResponseWriter, r *http.Request) (domain.PlayerSceneInput, bool) {
+	var input domain.PlayerSceneInput
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		h.writeError(w, http.StatusBadRequest, "invalid_request", "场景必须包含名称、图标、媒体 URL、音量和定时设置")
+		return domain.PlayerSceneInput{}, false
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		h.writeError(w, http.StatusBadRequest, "invalid_request", "请求只能包含一个 JSON 对象")
+		return domain.PlayerSceneInput{}, false
+	}
+	return input, true
+}
+
+func (h *Handler) writePlayerSceneError(w http.ResponseWriter, err error) bool {
+	if err == nil {
+		return false
+	}
+	switch {
+	case errors.Is(err, adapter.ErrCapabilityNotReady):
+		h.notReady(w)
+	case errors.Is(err, adapter.ErrInvalidInput):
+		h.writeError(w, http.StatusBadRequest, "invalid_request", "场景名称为 1..40 个字符，媒体地址必须为 HTTP/HTTPS URL，音量为 0..100，停止定时为 0..60 分钟，自动启动时间和星期必须有效")
+	case errors.Is(err, adapter.ErrNotFound):
+		h.writeError(w, http.StatusNotFound, "scene_not_found", "场景不存在或已被删除")
+	case errors.Is(err, adapter.ErrScheduleConflict):
+		h.writeError(w, http.StatusConflict, "scene_schedule_conflict", "同一启动时间的执行星期与已有场景重叠，请调整时间或星期")
+	case errors.Is(err, adapter.ErrConflict):
+		h.writeError(w, http.StatusConflict, "scene_limit_reached", "最多保存 20 个场景，请先删除不再使用的场景")
+	default:
+		h.internalError(w)
+	}
+	return true
+}
+
 func (h *Handler) adapterForRequest(w http.ResponseWriter, r *http.Request) (adapter.DeviceAdapter, string, bool) {
 	scenario := r.URL.Query().Get("scenario")
 	if scenario == "" || h.provider.Environment() != "mock" {
@@ -410,6 +502,8 @@ func (h *Handler) handleRead(w http.ResponseWriter, r *http.Request, path, scena
 		value, err = device.Schedules(ctx)
 	case BasePath + "/player":
 		value, err = device.Player(ctx)
+	case BasePath + "/scenes":
+		value, err = device.PlayerScenes(ctx)
 	default:
 		h.writeError(w, http.StatusNotFound, "not_found", "接口不存在")
 		return

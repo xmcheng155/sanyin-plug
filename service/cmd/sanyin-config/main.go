@@ -55,6 +55,9 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if starter, ok := provider.(interface{ StartBackgroundTasks() }); ok {
+		starter.StartBackgroundTasks()
+	}
 	build := domain.BuildInfo{Version: version, Commit: commit, BuiltAt: builtAt}
 	updateManager := updater.NewManager(updater.Config{
 		Build:         build,

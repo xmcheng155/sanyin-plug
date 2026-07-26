@@ -39,6 +39,25 @@ const eqModes = [
   { mode: 6, label: "ACG" },
 ];
 
+const sceneIcons = [
+	{ id: "music", label: "音乐" },
+	{ id: "morning", label: "清晨" },
+	{ id: "focus", label: "专注" },
+	{ id: "relax", label: "放松" },
+	{ id: "party", label: "聚会" },
+	{ id: "sleep", label: "睡眠" },
+];
+
+const sceneWeekdays = [
+	{ value: 1, label: "周一", short: "一" },
+	{ value: 2, label: "周二", short: "二" },
+	{ value: 3, label: "周三", short: "三" },
+	{ value: 4, label: "周四", short: "四" },
+	{ value: 5, label: "周五", short: "五" },
+	{ value: 6, label: "周六", short: "六" },
+	{ value: 7, label: "周日", short: "日" },
+];
+
 const api = new ApiClient();
 const app = {
   route: location.hash.slice(1) || "overview",
@@ -50,6 +69,7 @@ const app = {
 	error: null,
 	environment: null,
 	playerRefreshing: false,
+	sceneRefreshing: false,
 	playerVolumeUpdating: false,
 	playerVolumePending: null,
 	playerVolumeDesired: null,
@@ -57,6 +77,7 @@ const app = {
 	playerVolumeRevision: 0,
 	pendingUpdateFile: null,
 	pendingPlayerAction: null,
+	pendingSceneAction: null,
 	mobileMoreOpen: false,
 	lastUpdatedAt: null,
 	refreshError: null,
@@ -93,6 +114,13 @@ function iconMarkup(name, className = "ui-icon") {
 		bluetooth: '<path d="M7 7.5 17 16l-5 4V4l5 4-10 8.5"/>',
 		diagnostics: '<path d="M4 19V9M10 19V5M16 19v-7M22 19V3"/>',
 		update: '<path d="M12 3v12m0-12L7 8m5-5 5 5"/><path d="M5 14v6h14v-6"/>',
+		music: '<path d="M9 18V6l10-2v12"/><circle cx="6" cy="18" r="3"/><circle cx="16" cy="16" r="3"/>',
+		morning: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>',
+		focus: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="M12 2v3M22 12h-3M12 22v-3M2 12h3"/>',
+		relax: '<path d="M20 4C11 4 5 8.5 5 15c0 2.8 2.2 5 5 5 6.5 0 10-7 10-16Z"/><path d="M4 21c3-6 7-9 12-12"/>',
+		party: '<path d="m4 20 4-13 9 9-13 4Z"/><path d="m8 8 8-4M13 13l7-3M17 5l2 2M6 4l2 2M19 14l2 2"/>',
+		sleep: '<path d="M20 15.5A8.5 8.5 0 0 1 8.5 4 8.5 8.5 0 1 0 20 15.5Z"/>',
+		schedule: '<circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/>',
 		more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
 		chevron: '<path d="m9 5 7 7-7 7"/>',
 	};
@@ -141,6 +169,7 @@ async function initialize() {
   await loadData();
   connectEvents();
 	window.setInterval(refreshPlayer, 1000);
+	window.setInterval(refreshScenes, 30000);
 }
 
 function bindEvents() {
@@ -192,6 +221,20 @@ function bindEvents() {
 			else runPlayerAction(action, itemId, playerButton);
 		}
 		if (event.target.closest("#confirm-player-action")) confirmPlayerAction();
+		const sceneButton = event.target.closest("[data-scene-action]");
+		if (sceneButton) {
+			const action = sceneButton.dataset.sceneAction;
+			const sceneId = sceneButton.dataset.sceneId || "";
+			if (action === "create") openSceneEditor();
+			if (action === "edit") openSceneEditor(sceneId);
+			if (action === "apply") openSceneApplyConfirmation(sceneId);
+			if (action === "delete") openSceneDeleteConfirmation(sceneId);
+		}
+		if (event.target.closest("#save-player-scene")) savePlayerScene();
+		if (event.target.closest("#confirm-apply-scene")) applyPlayerScene();
+		if (event.target.closest("#confirm-delete-scene")) deletePlayerScene();
+		const sceneDaysButton = event.target.closest("[data-scene-days]");
+		if (sceneDaysButton) applySceneScheduleDays(sceneDaysButton.dataset.sceneDays);
 		const timerPreset = event.target.closest("[data-timer-minutes]");
 		if (timerPreset) applyTimerPreset(timerPreset);
 		const urlUtility = event.target.closest("[data-url-action]");
@@ -224,12 +267,18 @@ function bindEvents() {
 	document.addEventListener("input", (event) => {
 		clearFieldError(event.target);
 		if (event.target.id === "player-volume-range") queuePlayerVolume(event.target);
+		if (event.target.id === "scene-volume") {
+			const output = document.querySelector("#scene-volume-value");
+			if (output) output.textContent = `${event.target.value}%`;
+		}
 	});
 
 	document.addEventListener("change", (event) => {
 		clearFieldError(event.target);
 		if (event.target.id === "player-volume-range") queuePlayerVolume(event.target, { immediate: true });
 		if (event.target.matches("[data-media-url]")) validateMediaURLInput(event.target, { allowEmpty: true });
+		if (event.target.id === "scene-schedule-enabled") updateSceneScheduleControls();
+		if (event.target.matches('input[name="sceneWeekday"]')) updateSceneSchedulePresetState();
 	});
 
 	document.addEventListener("focusout", (event) => {
@@ -260,6 +309,7 @@ function bindEvents() {
 	elements.dialog.addEventListener("close", () => {
 		if (!app.operationBusy) {
 			app.pendingPlayerAction = null;
+			app.pendingSceneAction = null;
 			app.pendingUpdateFile = null;
 		}
 	});
@@ -344,8 +394,8 @@ async function loadData() {
 	updateRefreshStatus();
   renderPage();
   try {
-    const [capabilities, device, status, airplay, network, audio, bluetooth, lighting, schedules, player, system] = await Promise.all([
-      api.capabilities(), api.device(), api.status(), api.airplay(), api.network(), api.audio(), api.bluetooth(), api.lighting(), api.schedules(), api.player(), api.system(),
+		const [capabilities, device, status, airplay, network, audio, bluetooth, lighting, schedules, player, scenes, system] = await Promise.all([
+		  api.capabilities(), api.device(), api.status(), api.airplay(), api.network(), api.audio(), api.bluetooth(), api.lighting(), api.schedules(), api.player(), api.scenes(), api.system(),
     ]);
     app.data = {
       environment: status.environment,
@@ -360,6 +410,7 @@ async function loadData() {
       lighting: lighting.data,
       schedules: schedules.data,
 		player: player.data,
+		scenes: scenes.data,
 			system: system.data,
     };
 		app.environment = status.environment;
@@ -691,8 +742,41 @@ function renderBluetooth() {
     </section>`;
 }
 
+function normalizedSceneWeekdays(schedule) {
+	const values = Array.isArray(schedule?.weekdays) ? schedule.weekdays.map(Number).filter((value) => Number.isInteger(value) && value >= 1 && value <= 7) : [];
+	return [...new Set(values)].sort((left, right) => left - right);
+}
+
+function sceneScheduleSummary(schedule) {
+	if (!schedule?.enabled) return "手动启动";
+	const weekdays = normalizedSceneWeekdays(schedule);
+	const signature = weekdays.join(",");
+	const prefix = signature === "1,2,3,4,5,6,7" ? "每天" : signature === "1,2,3,4,5" ? "工作日" : signature === "6,7" ? "周末" : `周${weekdays.map((value) => sceneWeekdays.find((item) => item.value === value)?.short).filter(Boolean).join("、")}`;
+	return `${prefix} ${schedule.time || "07:30"}`;
+}
+
+function formatSceneScheduleTime(value) {
+	if (!value) return "";
+	const match = String(value).match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+	if (!match) return "";
+	return `${Number(match[2])}月${Number(match[3])}日 ${match[4]}:${match[5]}`;
+}
+
+function sceneScheduleDetail(schedule) {
+	if (!schedule?.enabled) return "按需手动启动";
+	const next = formatSceneScheduleTime(schedule.nextRunAt);
+	return next ? `下次 ${next}（音箱时间）` : "等待音箱计算下次时间";
+}
+
+function sceneScheduleLastRun(schedule) {
+	if (!schedule?.enabled || !schedule.lastRunAt) return "尚未自动执行";
+	const labels = { succeeded: "上次自动启动成功", failed: "上次自动启动失败", running: "上次已触发" };
+	return `${labels[schedule.lastRunOutcome] || "上次已执行"} · ${formatSceneScheduleTime(schedule.lastRunAt)}`;
+}
+
 function renderPlayer() {
 	const player = app.data.player;
+	const scenes = app.data.scenes || [];
 	const capability = actionPresentation(app.data.capabilityMap["player.localPlayback"]);
 	const transport = String(player.transport?.value || "unknown");
 	const position = Number(player.positionSeconds?.value || 0);
@@ -710,6 +794,18 @@ function renderPlayer() {
 	const stopTimer = player.stopTimer || { active: false, remainingSeconds: 0 };
 	const timerRemaining = Math.max(0, Number(stopTimer.remainingSeconds || 0));
 	const compatibilitySummary = capability.disabled ? "当前设备暂不可用" : "主要播放路径已完成实机验收";
+	const sceneCards = scenes.length ? scenes.map((scene) => {
+		const icon = sceneIcons.some((item) => item.id === scene.icon) ? scene.icon : "music";
+		const timer = Number(scene.timerMinutes) > 0 ? `${scene.timerMinutes} 分钟后停止` : "持续播放";
+		const scheduled = Boolean(scene.schedule?.enabled);
+		return `<article class="scene-card scene-tone-${escapeHTML(icon)}">
+			<div class="scene-card-header"><span class="scene-card-icon">${iconMarkup(icon)}</span><div class="scene-card-title"><strong>${escapeHTML(scene.name)}</strong><small>${escapeHTML(scene.title)}</small></div><div class="scene-card-tools"><button class="icon-button compact-icon" data-scene-action="edit" data-scene-id="${escapeHTML(scene.id)}" type="button" aria-label="编辑 ${escapeHTML(scene.name)}" ${capability.disabled ? "disabled" : ""}>✎</button><button class="icon-button compact-icon danger-icon" data-scene-action="delete" data-scene-id="${escapeHTML(scene.id)}" type="button" aria-label="删除 ${escapeHTML(scene.name)}" ${capability.disabled ? "disabled" : ""}>×</button></div></div>
+			<p class="scene-source" title="${escapeHTML(scene.source)}">${escapeHTML(scene.source)}</p>
+			<div class="scene-settings"><span>音量 ${escapeHTML(scene.volume)}%</span><span>${escapeHTML(timer)}</span></div>
+			<div class="scene-schedule-status ${scheduled ? "is-scheduled" : "is-manual"}"><span class="scene-schedule-icon">${iconMarkup("schedule")}</span><div><strong>${escapeHTML(sceneScheduleSummary(scene.schedule))}</strong><small>${escapeHTML(sceneScheduleDetail(scene.schedule))}</small><small>${escapeHTML(sceneScheduleLastRun(scene.schedule))}</small></div></div>
+			<button class="button scene-apply-button" data-scene-action="apply" data-scene-id="${escapeHTML(scene.id)}" type="button" ${capability.disabled ? "disabled" : ""}>启动场景</button>
+		</article>`;
+	}).join("") : `<div class="empty-state scene-empty"><span class="scene-empty-icon">${iconMarkup("music")}</span><strong>还没有场景</strong><p>把媒体、音量和定时保存起来，以后一次确认即可启动。</p><button class="button" data-scene-action="create" type="button" ${capability.disabled ? "disabled" : ""}>创建第一个场景</button></div>`;
 	const queue = player.queue.length ? player.queue.map((item, index) => {
 		const isCurrent = index === player.currentIndex;
 		const removeDisabled = capability.disabled || (isCurrent && active);
@@ -724,6 +820,11 @@ function renderPlayer() {
 		<div class="station-actions"><span class="station-order-actions"><button class="icon-button compact-icon" data-player-action="radio_move_up" data-item-id="${escapeHTML(station.id)}" type="button" aria-label="上移 ${escapeHTML(station.name)}" ${capability.disabled || index === 0 ? "disabled" : ""}>↑</button><button class="icon-button compact-icon" data-player-action="radio_move_down" data-item-id="${escapeHTML(station.id)}" type="button" aria-label="下移 ${escapeHTML(station.name)}" ${capability.disabled || index === player.stations.length - 1 ? "disabled" : ""}>↓</button></span><button class="button compact" data-player-action="radio_play" data-item-id="${escapeHTML(station.id)}" type="button" ${capability.disabled ? "disabled" : ""}>播放</button><button class="button secondary compact" data-player-action="radio_queue" data-item-id="${escapeHTML(station.id)}" type="button" ${capability.disabled ? "disabled" : ""}>加入队列</button><button class="icon-button compact-icon danger-icon" data-player-action="radio_remove" data-item-id="${escapeHTML(station.id)}" type="button" aria-label="删除 ${escapeHTML(station.name)}" ${capability.disabled ? "disabled" : ""}>×</button></div>
 	</article>`).join("") : `<div class="empty-state compact-empty">尚未收藏网络电台。</div>`;
 	return `
+		${sectionHeading("场景模式", "可手动启动，也可按音箱时间自动播放并同步音量与停止设置", `${scenes.length} / 20`)}
+		<section class="panel scene-panel">
+			<div class="scene-toolbar"><div><strong>我的场景</strong><span>场景和自动启动计划保存在音箱本机，关闭网页后仍会执行。</span></div><button class="button secondary" data-scene-action="create" type="button" ${capability.disabled || scenes.length >= 20 ? "disabled" : ""}>＋ 新建场景</button></div>
+			<div class="scene-grid">${sceneCards}</div>
+		</section>
 		<section class="panel player-now">
 			<div class="panel-header"><div><h2>正在播放</h2><p>音箱通过原厂 KPlayer 自主拉取媒体 URL，关闭当前网页不会中断播放。</p></div>${pill(player.transport)}</div>
 			<div class="now-playing-copy"><span class="now-playing-icon">${iconMarkup("audio")}</span><div><strong>${escapeHTML(current?.title || "暂无媒体")}</strong><small>${escapeHTML(current?.source || "等待播放 URL 或网络电台")}</small></div></div>
@@ -794,6 +895,257 @@ function renderPlayer() {
 		</section>`;
 }
 
+function sceneById(id) {
+	return (app.data?.scenes || []).find((scene) => scene.id === id);
+}
+
+function updateSceneSchedulePresetState() {
+	const selected = [...document.querySelectorAll('input[name="sceneWeekday"]:checked')].map((input) => Number(input.value)).sort((left, right) => left - right).join(",");
+	const presets = { all: "1,2,3,4,5,6,7", weekdays: "1,2,3,4,5", weekend: "6,7" };
+	document.querySelectorAll("[data-scene-days]").forEach((button) => {
+		const active = presets[button.dataset.sceneDays] === selected;
+		button.classList.toggle("selected", active);
+		button.setAttribute("aria-pressed", String(active));
+	});
+	if (selected) {
+		const error = document.querySelector("#scene-schedule-error");
+		if (error) error.textContent = "";
+	}
+}
+
+function updateSceneScheduleControls() {
+	const enabled = Boolean(document.querySelector("#scene-schedule-enabled")?.checked);
+	const section = document.querySelector(".scene-schedule-editor");
+	if (!section) return;
+	section.classList.toggle("is-disabled", !enabled);
+	section.dataset.scheduleDisabled = String(!enabled);
+	const stateLabel = section.querySelector(".scene-schedule-switch small");
+	if (stateLabel) stateLabel.textContent = enabled ? "已开启" : "未开启";
+	section.querySelectorAll('#scene-schedule-time, input[name="sceneWeekday"], [data-scene-days]').forEach((control) => {
+		control.disabled = !enabled;
+	});
+	updateSceneSchedulePresetState();
+}
+
+function applySceneScheduleDays(mode) {
+	const values = mode === "weekdays" ? [1, 2, 3, 4, 5] : mode === "weekend" ? [6, 7] : [1, 2, 3, 4, 5, 6, 7];
+	document.querySelectorAll('input[name="sceneWeekday"]').forEach((input) => {
+		input.checked = values.includes(Number(input.value));
+	});
+	const error = document.querySelector("#scene-schedule-error");
+	if (error) error.textContent = "";
+	updateSceneSchedulePresetState();
+}
+
+function openSceneEditor(sceneId = "") {
+	const scene = sceneId ? sceneById(sceneId) : null;
+	if (sceneId && !scene) {
+		toast("场景不存在或已被删除", "error");
+		return;
+	}
+	app.pendingSceneAction = { type: scene ? "edit" : "create", sceneId: scene?.id || "" };
+	const icon = sceneIcons.some((item) => item.id === scene?.icon) ? scene.icon : "music";
+	const schedule = scene?.schedule || { enabled: false, time: "07:30", weekdays: [1, 2, 3, 4, 5, 6, 7] };
+	const weekdays = new Set(normalizedSceneWeekdays(schedule).length ? normalizedSceneWeekdays(schedule) : [1, 2, 3, 4, 5, 6, 7]);
+	const currentSource = scene ? `<div class="saved-scene-source"><span>当前保存的地址</span><strong>${escapeHTML(scene.source)}</strong><small>地址可能包含已隐藏的私密参数；不填写新地址即可完整保留。</small></div>` : "";
+	elements.dialogContent.innerHTML = `
+		<span class="dialog-kicker">PLAYER SCENE</span>
+		<h2>${scene ? `编辑“${escapeHTML(scene.name)}”` : "新建场景"}</h2>
+		<p>场景会保存媒体、音量和定时设置；既可手动启动，也可由音箱每天自动执行。</p>
+		<div class="scene-editor">
+			<label class="field-label" for="scene-name">场景名称</label>
+			<input class="text-input" id="scene-name" name="name" type="text" maxlength="40" value="${escapeHTML(scene?.name || "")}" placeholder="例如：睡前放松" aria-describedby="scene-name-error">
+			<small id="scene-name-error" class="field-error" aria-live="polite"></small>
+			<span class="field-label">场景图标</span>
+			<div class="scene-icon-picker" role="radiogroup" aria-label="选择场景图标">${sceneIcons.map((item) => `<label class="scene-icon-option"><input type="radio" name="sceneIcon" value="${item.id}" ${item.id === icon ? "checked" : ""}><span>${iconMarkup(item.id)}<small>${escapeHTML(item.label)}</small></span></label>`).join("")}</div>
+			<label class="field-label" for="scene-title">播放标题（可选）</label>
+			<input class="text-input" id="scene-title" name="title" type="text" maxlength="100" value="${escapeHTML(scene?.title || "")}" placeholder="例如：轻音乐">
+			<label class="field-label" for="scene-url">媒体 URL${scene ? "（留空保留）" : ""}</label>
+			<div class="url-input-group"><input class="text-input" id="scene-url" name="url" type="url" maxlength="2048" placeholder="${scene ? "留空以保留当前地址" : "https://media.example/music.mp3"}" autocomplete="off" spellcheck="false" aria-describedby="scene-url-error" data-media-url><button class="input-utility-button" data-url-action="paste" type="button">粘贴</button><button class="input-utility-button" data-url-action="clear" type="button">清空</button></div>
+			<small id="scene-url-error" class="field-error" aria-live="polite"></small>
+			${currentSource}
+			<div class="scene-editor-row">
+				<div><label class="field-label" for="scene-volume">播放音量 <output id="scene-volume-value">${escapeHTML(scene?.volume ?? 30)}%</output></label><input id="scene-volume" class="scene-volume-input" name="volume" type="range" min="0" max="100" step="1" value="${escapeHTML(scene?.volume ?? 30)}"></div>
+				<div><label class="field-label" for="scene-timer">播放后停止</label><div class="scene-timer-input"><input class="text-input" id="scene-timer" name="timerMinutes" type="number" min="0" max="60" step="1" value="${escapeHTML(scene?.timerMinutes ?? 0)}" inputmode="numeric" aria-describedby="scene-timer-error"><span>分钟</span></div><small id="scene-timer-error" class="field-error" aria-live="polite"></small></div>
+			</div>
+			<p class="scene-editor-hint">播放后停止填写 0 表示持续播放，并会取消已有的停止定时。</p>
+			<section class="scene-schedule-editor ${schedule.enabled ? "" : "is-disabled"}" data-schedule-disabled="${!schedule.enabled}">
+				<div class="scene-schedule-heading"><div><strong>自动启动</strong><span>由音箱按本机时间执行，关闭网页后仍然有效。</span></div><label class="scene-schedule-switch"><input id="scene-schedule-enabled" type="checkbox" role="switch" ${schedule.enabled ? "checked" : ""}><span aria-hidden="true"></span><small>${schedule.enabled ? "已开启" : "未开启"}</small></label></div>
+				<div class="scene-schedule-fields">
+					<div><label class="field-label" for="scene-schedule-time">启动时间</label><input class="text-input" id="scene-schedule-time" type="time" value="${escapeHTML(schedule.time || "07:30")}" aria-describedby="scene-schedule-time-error" ${schedule.enabled ? "" : "disabled"}><small id="scene-schedule-time-error" class="field-error" aria-live="polite"></small></div>
+					<div><span class="field-label">快捷星期</span><div class="scene-day-presets" role="group" aria-label="快捷选择执行星期">${[{ id: "all", label: "每天" }, { id: "weekdays", label: "工作日" }, { id: "weekend", label: "周末" }].map((item) => `<button class="button secondary compact" data-scene-days="${item.id}" type="button" aria-pressed="false" ${schedule.enabled ? "" : "disabled"}>${item.label}</button>`).join("")}</div></div>
+				</div>
+				<div class="scene-weekday-picker" role="group" aria-label="选择自动启动星期">${sceneWeekdays.map((item) => `<label><input type="checkbox" name="sceneWeekday" value="${item.value}" ${weekdays.has(item.value) ? "checked" : ""} ${schedule.enabled ? "" : "disabled"}><span>${item.label}</span></label>`).join("")}</div>
+				<small id="scene-schedule-error" class="field-error" aria-live="polite"></small>
+			</section>
+			<p class="form-error" role="alert"></p>
+		</div>
+		<div class="dialog-actions"><button class="button secondary" value="cancel">取消</button><button id="save-player-scene" class="button" type="button">${scene ? "保存修改" : "保存场景"}</button></div>`;
+	setDialogBusy(false);
+	elements.dialog.showModal();
+	updateSceneScheduleControls();
+	window.setTimeout(() => document.querySelector("#scene-name")?.focus(), 0);
+}
+
+async function savePlayerScene() {
+	const pending = app.pendingSceneAction;
+	if (!pending || !["create", "edit"].includes(pending.type)) return;
+	const nameInput = document.querySelector("#scene-name");
+	const urlInput = document.querySelector("#scene-url");
+	const timerInput = document.querySelector("#scene-timer");
+	const scheduleEnabledInput = document.querySelector("#scene-schedule-enabled");
+	const scheduleTimeInput = document.querySelector("#scene-schedule-time");
+	const scheduleError = document.querySelector("#scene-schedule-error");
+	const name = nameInput.value.trim();
+	const url = urlInput.value.trim();
+	const volume = Number(document.querySelector("#scene-volume")?.value);
+	const timerMinutes = Number(timerInput.value);
+	const scheduleEnabled = Boolean(scheduleEnabledInput?.checked);
+	const scheduleTime = scheduleTimeInput?.value || "";
+	const scheduleWeekdays = [...document.querySelectorAll('input[name="sceneWeekday"]:checked')].map((input) => Number(input.value)).sort((left, right) => left - right);
+	let invalid = false;
+	let firstInvalid = null;
+	if (!name || [...name].length > 40) {
+		setFieldError(nameInput, "请输入 1 到 40 个字符的场景名称");
+		invalid = true;
+		firstInvalid ||= nameInput;
+	}
+	if (pending.type === "create" || url) {
+		const urlError = validateMediaURL(url);
+		if (urlError) {
+			setFieldError(urlInput, urlError);
+			invalid = true;
+			firstInvalid ||= urlInput;
+		}
+	}
+	if (!Number.isInteger(timerMinutes) || timerMinutes < 0 || timerMinutes > 60) {
+		setFieldError(timerInput, "请输入 0 到 60 分钟的整数");
+		invalid = true;
+		firstInvalid ||= timerInput;
+	}
+	if (!Number.isInteger(volume) || volume < 0 || volume > 100) invalid = true;
+	if (scheduleEnabled && !/^([01]\d|2[0-3]):[0-5]\d$/.test(scheduleTime)) {
+		setFieldError(scheduleTimeInput, "请选择有效的启动时间");
+		invalid = true;
+		firstInvalid ||= scheduleTimeInput;
+	}
+	if (scheduleEnabled && scheduleWeekdays.length === 0) {
+		if (scheduleError) scheduleError.textContent = "请至少选择一个执行星期";
+		invalid = true;
+		firstInvalid ||= scheduleEnabledInput;
+	} else if (scheduleError) {
+		scheduleError.textContent = "";
+	}
+	if (invalid) {
+		firstInvalid?.focus();
+		return;
+	}
+	const payload = {
+		name,
+		icon: document.querySelector('input[name="sceneIcon"]:checked')?.value || "music",
+		title: document.querySelector("#scene-title")?.value.trim() || "",
+		url,
+		volume,
+		timerMinutes,
+		schedule: {
+			enabled: scheduleEnabled,
+			time: scheduleTime || "07:30",
+			weekdays: scheduleWeekdays.length ? scheduleWeekdays : [1, 2, 3, 4, 5, 6, 7],
+		},
+	};
+	const button = document.querySelector("#save-player-scene");
+	setDialogBusy(true);
+	button.disabled = true;
+	button.textContent = "保存中…";
+	try {
+		const response = pending.type === "create" ? await api.createScene(payload) : await api.updateScene(pending.sceneId, payload);
+		app.data.scenes = response.data;
+		app.pendingSceneAction = null;
+		setDialogBusy(false);
+		elements.dialog.close();
+		renderPage();
+		toast(pending.type === "create" ? "场景已保存到音箱" : "场景修改已保存", "success");
+	} catch (error) {
+		setDialogBusy(false);
+		button.disabled = false;
+		button.textContent = pending.type === "create" ? "保存场景" : "保存修改";
+		setFormError(document.querySelector(".scene-editor"), error.message);
+	}
+}
+
+function openSceneApplyConfirmation(sceneId) {
+	const scene = sceneById(sceneId);
+	if (!scene) {
+		toast("场景不存在或已被删除", "error");
+		return;
+	}
+	app.pendingSceneAction = { type: "apply", sceneId };
+	const timer = scene.timerMinutes > 0 ? `${scene.timerMinutes} 分钟后停止` : "持续播放并取消已有定时";
+	elements.dialogContent.innerHTML = `
+		<span class="dialog-kicker">APPLY PLAYER SCENE</span>
+		<h2>启动“${escapeHTML(scene.name)}”？</h2>
+		<p>确认后将按固定顺序执行并回读播放器最终状态。</p>
+		<div class="scene-apply-preview"><span class="scene-card-icon">${iconMarkup(scene.icon)}</span><div><strong>${escapeHTML(scene.title)}</strong><small>${escapeHTML(scene.source)}</small></div></div>
+		<div class="operation-impact"><span>将要进行的操作</span><strong>替换当前播放 · 音量 ${escapeHTML(scene.volume)}% · ${escapeHTML(timer)}</strong></div>
+		<div class="dialog-actions"><button class="button secondary" value="cancel">取消</button><button id="confirm-apply-scene" class="button" type="button">确认启动</button></div>`;
+	setDialogBusy(false);
+	elements.dialog.showModal();
+}
+
+async function applyPlayerScene() {
+	const pending = app.pendingSceneAction;
+	if (!pending || pending.type !== "apply") return;
+	const scene = sceneById(pending.sceneId);
+	showOperationLoading("PLAYER SCENE", `正在启动“${scene?.name || "场景"}”`, "媒体、音量和定时将逐项应用并回读…", ["替换当前播放", "应用场景音量", "同步定时停止", "回读最终状态"]);
+	try {
+		const response = await api.applyScene(pending.sceneId);
+		app.data.player = response.data.player;
+		app.pendingSceneAction = null;
+		elements.dialogContent.innerHTML = `<span class="dialog-kicker">PLAYER SCENE</span><h2>“${escapeHTML(response.data.scene.name)}”已启动</h2><p>播放器已确认媒体、音量和定时状态。</p><div class="operation-timeline"><div class="operation-step complete"><span class="step-dot">✓</span><span>播放已替换为 ${escapeHTML(response.data.scene.title)}</span></div><div class="operation-step complete"><span class="step-dot">✓</span><span>音量已回读为 ${escapeHTML(response.data.scene.volume)}%</span></div><div class="operation-step complete"><span class="step-dot">✓</span><span>${response.data.scene.timerMinutes > 0 ? `已设置 ${escapeHTML(response.data.scene.timerMinutes)} 分钟后停止` : "已取消旧定时并持续播放"}</span></div></div><div class="dialog-actions"><button class="button" value="done">完成</button></div>`;
+		finishDialogOperation();
+		renderPage();
+	} catch (error) {
+		app.pendingSceneAction = null;
+		elements.dialogContent.innerHTML = `<span class="dialog-kicker">PLAYER SCENE</span><h2>场景未完整启动</h2><p>${escapeHTML(error.message)}</p><div class="capability-callout"><strong>请查看当前播放状态</strong><span>媒体、音量和定时按顺序执行，失败前的设置可能已经生效。</span></div><div class="dialog-actions"><button class="button secondary" value="done">关闭</button></div>`;
+		finishDialogOperation();
+	}
+}
+
+function openSceneDeleteConfirmation(sceneId) {
+	const scene = sceneById(sceneId);
+	if (!scene) {
+		toast("场景不存在或已被删除", "error");
+		return;
+	}
+	app.pendingSceneAction = { type: "delete", sceneId };
+	elements.dialogContent.innerHTML = `
+		<span class="dialog-kicker">PLAYER SCENE</span>
+		<h2>删除“${escapeHTML(scene.name)}”？</h2>
+		<p>删除场景不会停止当前播放，也不会删除网络电台收藏。</p>
+		<div class="capability-callout"><strong>此操作不可撤销</strong><span>媒体地址、音量和定时组合将从音箱本机移除。</span></div>
+		<div class="dialog-actions"><button class="button secondary" value="cancel">取消</button><button id="confirm-delete-scene" class="button danger" type="button">确认删除</button></div>`;
+	setDialogBusy(false);
+	elements.dialog.showModal();
+}
+
+async function deletePlayerScene() {
+	const pending = app.pendingSceneAction;
+	if (!pending || pending.type !== "delete") return;
+	showOperationLoading("PLAYER SCENE", "正在删除场景", "等待音箱完成持久化…", ["发送删除请求", "写入本机配置", "刷新场景列表"]);
+	try {
+		const response = await api.deleteScene(pending.sceneId);
+		app.data.scenes = response.data;
+		app.pendingSceneAction = null;
+		elements.dialogContent.innerHTML = `<span class="dialog-kicker">PLAYER SCENE</span><h2>场景已删除</h2><p>音箱已返回最新场景列表。</p><div class="dialog-actions"><button class="button" value="done">完成</button></div>`;
+		finishDialogOperation();
+		renderPage();
+	} catch (error) {
+		app.pendingSceneAction = null;
+		elements.dialogContent.innerHTML = `<span class="dialog-kicker">PLAYER SCENE</span><h2>场景删除失败</h2><p>${escapeHTML(error.message)}</p><div class="dialog-actions"><button class="button secondary" value="done">关闭</button></div>`;
+		finishDialogOperation();
+	}
+}
+
 async function refreshPlayer() {
 	if (!app.data || app.environment !== "device" || app.playerRefreshing || playerVolumeBusy()) return;
 	app.playerRefreshing = true;
@@ -805,6 +1157,20 @@ async function refreshPlayer() {
 		if (app.route === "player") console.warn("播放器状态刷新失败", error);
 	} finally {
 		app.playerRefreshing = false;
+	}
+}
+
+async function refreshScenes() {
+	if (!app.data || app.environment !== "device" || app.sceneRefreshing) return;
+	app.sceneRefreshing = true;
+	try {
+		const response = await api.scenes();
+		app.data.scenes = response.data;
+		if (app.route === "player") renderPage();
+	} catch (error) {
+		if (app.route === "player") console.warn("场景计划刷新失败", error);
+	} finally {
+		app.sceneRefreshing = false;
 	}
 }
 

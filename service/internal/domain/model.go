@@ -172,6 +172,48 @@ type PlayerCommand struct {
 	Volume          *int
 }
 
+type PlayerScene struct {
+	ID           string              `json:"id"`
+	Name         string              `json:"name"`
+	Icon         string              `json:"icon"`
+	Title        string              `json:"title"`
+	Source       string              `json:"source"`
+	Volume       int                 `json:"volume"`
+	TimerMinutes int                 `json:"timerMinutes"`
+	Schedule     PlayerSceneSchedule `json:"schedule"`
+}
+
+type PlayerSceneInput struct {
+	Name         string                   `json:"name"`
+	Icon         string                   `json:"icon"`
+	Title        string                   `json:"title"`
+	URL          string                   `json:"url"`
+	Volume       int                      `json:"volume"`
+	TimerMinutes int                      `json:"timerMinutes"`
+	Schedule     PlayerSceneScheduleInput `json:"schedule"`
+}
+
+// PlayerSceneScheduleInput uses ISO weekdays: 1 is Monday and 7 is Sunday.
+type PlayerSceneScheduleInput struct {
+	Enabled  bool   `json:"enabled"`
+	Time     string `json:"time"`
+	Weekdays []int  `json:"weekdays"`
+}
+
+type PlayerSceneSchedule struct {
+	Enabled        bool       `json:"enabled"`
+	Time           string     `json:"time"`
+	Weekdays       []int      `json:"weekdays"`
+	NextRunAt      *time.Time `json:"nextRunAt,omitempty"`
+	LastRunAt      *time.Time `json:"lastRunAt,omitempty"`
+	LastRunOutcome string     `json:"lastRunOutcome,omitempty"`
+}
+
+type PlayerSceneApplication struct {
+	Scene  PlayerScene `json:"scene"`
+	Player Player      `json:"player"`
+}
+
 type Event struct {
 	Type       string    `json:"type"`
 	Scenario   string    `json:"scenario"`

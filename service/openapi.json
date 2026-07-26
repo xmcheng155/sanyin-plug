@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "三音本地配置服务 API",
-	"version": "1.8.0",
-	"description": "同一套契约支持 Mock 与真实设备模式；真实设备开放 AirPlay、安全局域网状态读取、KPlayer 本地 URL/队列/网络电台播放、0..100 音量回读调节与最长 60 分钟的设备端定时停止，以及带设备验收或自动回退的实验性蓝牙、EQ 与 Wi-Fi 配置。系统接口提供应用版本读取，以及经过 Ed25519 签名、平台与哈希校验、健康检查和自动回滚的单文件更新。"
+	"version": "1.9.0",
+	"description": "同一套契约支持 Mock 与真实设备模式；真实设备开放 AirPlay、安全局域网状态读取、KPlayer 本地 URL/队列/网络电台播放、0..100 音量回读调节、最长 60 分钟的设备端定时停止，以及支持按音箱时间自动启动的持久化播放器场景。自动启动支持自定义星期、防同分钟重复与重叠计划冲突校验。系统接口还提供带设备验收或自动回退的实验性蓝牙、EQ 与 Wi-Fi 配置，以及经过 Ed25519 签名、平台与哈希校验、健康检查和自动回滚的单文件更新。"
   },
   "servers": [{ "url": "/api/v1" }],
   "paths": {
@@ -19,6 +19,9 @@
     "/schedules": { "get": { "summary": "读取计划任务诊断快照", "parameters": [{ "$ref": "#/components/parameters/Scenario" }], "responses": { "200": { "$ref": "#/components/responses/JSONEnvelope" } } } },
     "/player": { "get": { "summary": "读取 KPlayer 播放状态、音量、进度、队列、网络电台与定时停止状态", "parameters": [{ "$ref": "#/components/parameters/Scenario" }], "responses": { "200": { "description": "脱敏后的播放器状态", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } } } } } },
     "/player/control": { "post": { "summary": "控制本地播放、音量、队列、网络电台与定时停止", "description": "真实设备通过标准 UPnP AVTransport 与 RenderingControl 调用原厂 KPlayer。volume_set 接受 0..100 的 volume，仅在本地播放中执行并回读验证，暂停或停止时拒绝；radio_move_up 和 radio_move_down 携带 itemId 调整并持久化电台顺序；timer_set 接受 1..60 的 durationMinutes 并由音箱端服务到时停止，timer_cancel 取消。完整媒体 URL 只用于设备拉流；响应中的 source 会删除查询参数和用户信息。", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PlayerCommand" } } } }, "responses": { "200": { "description": "控制完成并回读后的播放器状态", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } } }, "400": { "description": "action、媒体 URL、标题、音量或定时范围无效" }, "404": { "description": "队列项或电台不存在" }, "409": { "description": "Mock 能力未开放、播放器未激活，或当前播放项存在操作冲突" } } } },
+    "/scenes": { "get": { "summary": "读取持久化播放器场景", "description": "场景存储在音箱自有配置目录；source 会删除查询参数和用户信息。schedule 包含按音箱时区计算的下次执行时间和上次执行结果。", "responses": { "200": { "$ref": "#/components/responses/JSONEnvelope" } } }, "post": { "summary": "创建播放器场景", "description": "最多保存 20 个场景；完整 URL 只保存在音箱的 0600 配置文件中。同一时间且星期重叠的启用计划会被拒绝。", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PlayerSceneInput" } } } }, "responses": { "201": { "$ref": "#/components/responses/JSONEnvelope" }, "400": { "description": "场景字段或计划无效" }, "409": { "description": "Mock 能力未开放、达到数量上限或自动启动计划冲突" } } } },
+    "/scenes/{sceneId}": { "parameters": [{ "name": "sceneId", "in": "path", "required": true, "schema": { "type": "string" } }], "put": { "summary": "修改播放器场景", "description": "url 为空时保留设备中已保存的完整地址，避免已隐藏的私密查询参数丢失；修改计划时同样执行重叠冲突校验。", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PlayerSceneInput" } } } }, "responses": { "200": { "$ref": "#/components/responses/JSONEnvelope" }, "400": { "description": "场景字段或计划无效" }, "404": { "description": "场景不存在" }, "409": { "description": "Mock 能力未开放或自动启动计划冲突" } } }, "delete": { "summary": "删除播放器场景", "responses": { "200": { "$ref": "#/components/responses/JSONEnvelope" }, "404": { "description": "场景不存在" }, "409": { "$ref": "#/components/responses/NotReady" } } } },
+    "/scenes/{sceneId}/apply": { "parameters": [{ "name": "sceneId", "in": "path", "required": true, "schema": { "type": "string" } }], "post": { "summary": "启动播放器场景", "description": "按顺序替换当前播放、设置并回读音量，再设置或取消定时停止；成功响应包含场景和最终播放器状态。", "responses": { "200": { "description": "场景已应用并回读", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } } }, "404": { "description": "场景不存在" }, "409": { "$ref": "#/components/responses/NotReady" } } } },
     "/events": { "get": { "summary": "订阅归一化状态事件", "parameters": [{ "$ref": "#/components/parameters/Scenario" }], "responses": { "200": { "description": "SSE snapshot 事件", "content": { "text/event-stream": { "schema": { "type": "string" } } } } } } },
 	"/airplay/recover": { "post": { "summary": "恢复 AirPlay 并验收端口", "description": "真实设备模式发送已验证的原生启动命令并验收 TCP 5002；Mock 模式仅在 simulate=true 时演示明确标记的流程。", "parameters": [{ "$ref": "#/components/parameters/Scenario" }, { "name": "simulate", "in": "query", "schema": { "type": "boolean", "default": false } }], "responses": { "202": { "$ref": "#/components/responses/JSONEnvelope" }, "409": { "$ref": "#/components/responses/NotReady" } } } },
 	"/airplay/auto-recover": { "put": { "summary": "修改 AirPlay 自动恢复配置", "description": "仅真实设备模式可用；原子写入自有配置并回读验收，不修改厂商数据库。", "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["enabled"], "properties": { "enabled": { "type": "boolean" } }, "additionalProperties": false } } } }, "responses": { "202": { "$ref": "#/components/responses/JSONEnvelope" }, "400": { "description": "请求格式无效" }, "409": { "$ref": "#/components/responses/NotReady" } } } },
@@ -91,6 +94,67 @@
           "url": { "type": "string", "format": "uri", "maxLength": 2048 },
           "durationMinutes": { "type": "integer", "minimum": 1, "maximum": 60 },
           "volume": { "type": "integer", "minimum": 0, "maximum": 100 }
+        },
+        "additionalProperties": false
+      },
+      "PlayerSceneInput": {
+        "type": "object",
+        "required": ["name", "icon", "title", "url", "volume", "timerMinutes", "schedule"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 40 },
+          "icon": { "type": "string", "enum": ["music", "morning", "focus", "relax", "party", "sleep"] },
+          "title": { "type": "string", "maxLength": 100 },
+          "url": { "type": "string", "description": "创建时为完整 HTTP/HTTPS URL；修改时允许空字符串以保留已保存地址。", "maxLength": 2048 },
+          "volume": { "type": "integer", "minimum": 0, "maximum": 100 },
+          "timerMinutes": { "type": "integer", "minimum": 0, "maximum": 60 },
+          "schedule": { "$ref": "#/components/schemas/PlayerSceneScheduleInput" }
+        },
+        "additionalProperties": false
+      },
+      "PlayerSceneScheduleInput": {
+        "type": "object",
+        "required": ["enabled", "time", "weekdays"],
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "time": { "type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$", "example": "07:30" },
+          "weekdays": { "type": "array", "description": "ISO 星期：1 为周一，7 为周日。", "minItems": 1, "maxItems": 7, "uniqueItems": true, "items": { "type": "integer", "minimum": 1, "maximum": 7 } }
+        },
+        "additionalProperties": false
+      },
+      "PlayerScene": {
+        "type": "object",
+        "required": ["id", "name", "icon", "title", "source", "volume", "timerMinutes", "schedule"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "icon": { "type": "string" },
+          "title": { "type": "string" },
+          "source": { "type": "string", "description": "已删除查询参数和用户信息的公开媒体地址。" },
+          "volume": { "type": "integer" },
+          "timerMinutes": { "type": "integer" },
+          "schedule": { "$ref": "#/components/schemas/PlayerSceneSchedule" }
+        },
+        "additionalProperties": false
+      },
+      "PlayerSceneSchedule": {
+        "type": "object",
+        "required": ["enabled", "time", "weekdays"],
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "time": { "type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$" },
+          "weekdays": { "type": "array", "minItems": 1, "maxItems": 7, "uniqueItems": true, "items": { "type": "integer", "minimum": 1, "maximum": 7 } },
+          "nextRunAt": { "type": "string", "format": "date-time" },
+          "lastRunAt": { "type": "string", "format": "date-time" },
+          "lastRunOutcome": { "type": "string", "enum": ["running", "succeeded", "failed"] }
+        },
+        "additionalProperties": false
+      },
+      "PlayerSceneApplication": {
+        "type": "object",
+        "required": ["scene", "player"],
+        "properties": {
+          "scene": { "$ref": "#/components/schemas/PlayerScene" },
+          "player": { "type": "object" }
         },
         "additionalProperties": false
       },
