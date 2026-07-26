@@ -26,22 +26,35 @@
       <header class="topbar">
         <div>
           <p class="eyebrow">LOCAL CONTROL</p>
-          <h1 id="page-title">设备总览</h1>
+          <h1 id="page-title" tabindex="-1">设备总览</h1>
         </div>
         <div class="topbar-actions">
           <label class="scenario-control">
             <span>模拟场景</span>
             <select id="scenario-select" aria-label="选择模拟场景"></select>
           </label>
-          <button id="refresh-button" class="icon-button" type="button" aria-label="刷新状态" title="刷新状态">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7"/></svg>
-          </button>
+          <div class="refresh-control">
+            <span id="refresh-status" class="refresh-status" role="status">尚未同步</span>
+            <button id="refresh-button" class="icon-button" type="button" aria-label="刷新设备状态" title="刷新设备状态">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7"/></svg>
+            </button>
+          </div>
         </div>
       </header>
+
+      <section id="device-context" class="device-context" aria-label="当前设备信息" aria-busy="true">
+        <span class="context-indicator"></span>
+        <div class="context-primary"><strong>正在识别设备</strong><small>等待本地配置服务响应</small></div>
+      </section>
 
       <div id="environment-banner" class="environment-banner" role="status">
         <span class="banner-icon">M</span>
 		<span><strong>模拟数据环境</strong><small>所有状态和操作均为本机 Mock，不会连接或修改音箱。</small></span>
+      </div>
+
+      <div id="connection-banner" class="connection-banner" role="alert" hidden>
+        <span><strong>设备连接异常</strong><small id="connection-detail">正在保留最近一次状态。</small></span>
+        <button class="button secondary compact" data-action="retry-load" type="button">重新连接</button>
       </div>
 
       <section id="page-content" class="page-content" aria-live="polite">
@@ -55,14 +68,14 @@
 
   <nav id="mobile-nav" class="mobile-nav" aria-label="移动端主导航"></nav>
 
-  <dialog id="operation-dialog" class="operation-dialog">
+  <dialog id="operation-dialog" class="operation-dialog" aria-label="设备操作">
     <form method="dialog" class="dialog-card">
       <button class="dialog-close" value="cancel" aria-label="关闭">×</button>
       <div id="operation-dialog-content"></div>
     </form>
   </dialog>
 
-  <div id="toast-region" class="toast-region" aria-live="assertive"></div>
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
   <script type="module" src="/src/app.js"></script>
 </body>
 </html>

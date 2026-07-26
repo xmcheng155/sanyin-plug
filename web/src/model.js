@@ -113,6 +113,7 @@ export function operationPresentation(operation) {
 
 export function layoutMode(width) {
   if (width <= 760) return "mobile";
+	if (width <= 900) return "tablet";
   if (width <= 1080) return "compact-desktop";
   return "desktop";
 }
@@ -130,6 +131,35 @@ export function formatDuration(seconds) {
 	const minuteText = String(minutes).padStart(2, "0");
 	const secondText = String(remainder).padStart(2, "0");
 	return hours > 0 ? `${String(hours).padStart(2, "0")}:${minuteText}:${secondText}` : `${minuteText}:${secondText}`;
+}
+
+export function toneRank(tone) {
+	return { danger: 0, warning: 1, unknown: 2, neutral: 3, ok: 4 }[tone] ?? 5;
+}
+
+export function validateMediaURL(value) {
+	const input = String(value || "").trim();
+	if (!input) return "请输入媒体 URL";
+	try {
+		const url = new URL(input);
+		if (!["http:", "https:"].includes(url.protocol)) return "仅支持 HTTP 或 HTTPS 地址";
+		if (!url.hostname) return "请输入完整的媒体地址";
+		return "";
+	} catch {
+		return "请输入完整的 HTTP/HTTPS 地址";
+	}
+}
+
+export function validateSSID(value) {
+	const input = String(value || "").trim();
+	if (!input) return "请输入 Wi-Fi 名称";
+	if (new TextEncoder().encode(input).length > 32) return "Wi-Fi 名称不能超过 32 字节";
+	return "";
+}
+
+export function validateTimerMinutes(value) {
+	const minutes = Number(value);
+	return Number.isInteger(minutes) && minutes >= 1 && minutes <= 60 ? "" : "请输入 1 到 60 分钟的整数";
 }
 
 export function escapeHTML(value) {

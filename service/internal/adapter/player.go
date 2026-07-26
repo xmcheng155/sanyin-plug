@@ -349,6 +349,7 @@ type playbackManager struct {
 	now        func() time.Time
 	pollEvery  time.Duration
 
+	operationMu         sync.Mutex
 	mu                  sync.Mutex
 	queue               []playerEntry
 	currentIndex        int
@@ -582,6 +583,8 @@ func (m *playbackManager) scheduleStop(duration time.Duration) error {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		m.operationMu.Lock()
+		defer m.operationMu.Unlock()
 		if err := m.controller.Stop(ctx); err == nil {
 			_ = m.waitFor(ctx, "stopped")
 		}
@@ -592,6 +595,15 @@ func (m *playbackManager) scheduleStop(duration time.Duration) error {
 
 func (m *playbackManager) status(ctx context.Context) (domain.Player, error) {
 	m.ensureStationsLoaded(ctx)
+	m.operationMu.Lock()
+	defer m.operationMu.Unlock()
+	return m.statusLocked(ctx)
+}
+
+// statusLocked keeps a complete KPlayer status read in the same serialized
+// operation as control transactions. The embedded player is sensitive to
+// overlapping SOAP requests from browser polling, queue monitoring and writes.
+func (m *playbackManager) statusLocked(ctx context.Context) (domain.Player, error) {
 	status, err := m.controller.Status(ctx)
 	if err != nil {
 		return domain.Player{}, err
@@ -729,9 +741,11 @@ func (m *playbackManager) startMonitor() {
 			}
 			m.mu.Unlock()
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			m.operationMu.Lock()
 			status, err := m.controller.Status(ctx)
 			cancel()
 			if err != nil {
+				m.operationMu.Unlock()
 				continue
 			}
 			m.mu.Lock()
@@ -739,21 +753,25 @@ func (m *playbackManager) startMonitor() {
 			if status.State == "playing" || status.State == "paused" || status.State == "transitioning" {
 				wasActive = true
 				m.mu.Unlock()
+				m.operationMu.Unlock()
 				continue
 			}
 			if status.State != "stopped" || !wasActive {
 				m.mu.Unlock()
+				m.operationMu.Unlock()
 				continue
 			}
 			next := m.currentIndex + 1
 			hasNext := next >= 0 && next < len(m.queue)
 			m.mu.Unlock()
 			if !hasNext {
+				m.operationMu.Unlock()
 				return
 			}
 			ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
 			err = m.playIndex(ctx, next)
 			cancel()
+			m.operationMu.Unlock()
 			if err != nil {
 				return
 			}
@@ -764,6 +782,8 @@ func (m *playbackManager) startMonitor() {
 
 func (m *playbackManager) control(ctx context.Context, command domain.PlayerCommand) (domain.Player, error) {
 	m.ensureStationsLoaded(ctx)
+	m.operationMu.Lock()
+	defer m.operationMu.Unlock()
 	switch command.Action {
 	case "play_url", "queue_add":
 		mediaURL, err := validateMediaURL(command.URL)
@@ -821,7 +841,7 @@ func (m *playbackManager) control(ctx context.Context, command domain.PlayerComm
 		if command.Volume == nil || *command.Volume < 0 || *command.Volume > 100 {
 			return domain.Player{}, ErrInvalidInput
 		}
-		current, err := m.status(ctx)
+		current, err := m.statusLocked(ctx)
 		if err != nil {
 			return domain.Player{}, err
 		}
@@ -1007,5 +1027,5 @@ func (m *playbackManager) control(ctx context.Context, command domain.PlayerComm
 	default:
 		return domain.Player{}, ErrInvalidInput
 	}
-	return m.status(ctx)
+	return m.statusLocked(ctx)
 }

@@ -8,6 +8,10 @@ import {
   layoutMode,
   operationPresentation,
   statePresentation,
+	toneRank,
+	validateMediaURL,
+	validateSSID,
+	validateTimerMinutes,
 } from "../src/model.js";
 
 const observed = (value, freshness = "fresh") => ({
@@ -133,10 +137,12 @@ test("主题使用与旧设备界面匹配的石墨黑、暖白和网易红", as
 
 test("手机和桌面关键布局均有明确断点", async () => {
   assert.equal(layoutMode(390), "mobile");
-  assert.equal(layoutMode(900), "compact-desktop");
+	assert.equal(layoutMode(768), "tablet");
+	assert.equal(layoutMode(900), "tablet");
+	assert.equal(layoutMode(1000), "compact-desktop");
   assert.equal(layoutMode(1440), "desktop");
   const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
-  assert.match(css, /@media \(max-width: 760px\)/);
+	assert.match(css, /@media \(max-width: 900px\)/);
   assert.match(css, /\.mobile-nav \{ position: fixed/);
   assert.match(css, /\.topbar-actions \{ width: 100%/);
   assert.match(css, /@media \(max-width: 1080px\)/);
@@ -208,6 +214,58 @@ test("播放器进度使用稳定的时分秒格式", () => {
 	assert.equal(formatDuration(-1), "00:00");
 });
 
+test("异常状态在总览中的排序高于正常状态", () => {
+	assert.ok(toneRank("danger") < toneRank("warning"));
+	assert.ok(toneRank("warning") < toneRank("unknown"));
+	assert.ok(toneRank("unknown") < toneRank("ok"));
+});
+
+test("配置表单提供可复用的前端校验", () => {
+	assert.equal(validateMediaURL("https://media.example/music.mp3"), "");
+	assert.match(validateMediaURL("file:///tmp/music.mp3"), /HTTP/);
+	assert.match(validateMediaURL("not-a-url"), /完整/);
+	assert.equal(validateSSID("演示网络"), "");
+	assert.match(validateSSID(""), /Wi-Fi/);
+	assert.equal(validateTimerMinutes(30), "");
+	assert.match(validateTimerMinutes(61), /1 到 60/);
+});
+
+test("移动端导航收敛为三个主入口和更多菜单", async () => {
+	const appSource = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
+	const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
+	assert.match(appSource, /mobilePrimaryOrder = \["overview", "player", "airplay"\]/);
+	assert.match(appSource, /mobilePrimaryRoutes = new Set\(mobilePrimaryOrder\)/);
+	assert.match(appSource, /data-action="toggle-mobile-more"/);
+	assert.match(appSource, /aria-current="page"/);
+	assert.match(css, /\.mobile-nav \{[^}]*grid-template-columns: repeat\(4, 1fr\)/s);
+	assert.doesNotMatch(css, /\.mobile-nav \{[^}]*repeat\(8/s);
+});
+
+test("页面提供设备上下文、刷新时间和断线保留状态", async () => {
+	const html = await readFile(new URL("../index.html", import.meta.url), "utf8");
+	const appSource = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
+	assert.match(html, /id="device-context"/);
+	assert.match(html, /id="refresh-status"/);
+	assert.match(html, /id="connection-banner"/);
+	assert.match(appSource, /lastUpdatedAt/);
+	assert.match(appSource, /已保留最近一次设备状态/);
+	assert.match(appSource, /overviewItems[\s\S]*sort\(\(a, b\) => toneRank/);
+});
+
+test("危险操作、表单反馈和降低动画均有明确样式", async () => {
+	const appSource = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
+	const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
+	assert.match(appSource, /class="button danger" data-player-action="queue_clear"/);
+	assert.match(appSource, /data-action="toggle-password"/);
+	assert.match(appSource, /class="field-error"/);
+	assert.match(appSource, /showOperationLoading/);
+	assert.match(css, /\.button\.warning/);
+	assert.match(css, /\.button\.danger/);
+	assert.match(css, /\.icon-button \{ width: 44px; height: 44px; \}/);
+	assert.match(css, /\.password-toggle \{[^}]*height: 44px/s);
+	assert.match(css, /@media \(prefers-reduced-motion: reduce\)/);
+});
+
 test("网页提供本地 URL 播放、完整控制、队列和网络电台", async () => {
 	const appSource = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
 	const apiSource = await readFile(new URL("../src/api.js", import.meta.url), "utf8");
@@ -229,8 +287,12 @@ test("网页提供本地 URL 播放、完整控制、队列和网络电台", asy
 	assert.match(appSource, /name="volume"[^>]*min="0"[^>]*max="100"/);
 	assert.match(appSource, /volume_set/);
 	assert.match(appSource, /volumeAdjustable = transport === "playing"/);
-	assert.match(appSource, /松手后立即生效/);
-	assert.match(appSource, /applyPlayerVolume\(event\.target\)/);
+	assert.match(appSource, /拖动时自动生效/);
+	assert.match(appSource, /queuePlayerVolume\(event\.target/);
+	assert.match(appSource, /playerVolumePending/);
+	assert.match(appSource, /window\.setTimeout\(flushPlayerVolume, 150\)/);
+	assert.doesNotMatch(appSource, /input\.disabled = true/);
+	assert.doesNotMatch(appSource, /input\.blur\(\)/);
 	assert.doesNotMatch(appSource, />应用音量</);
 	assert.match(apiSource, /player\(\)/);
 	assert.match(apiSource, /controlPlayer\(action/);
@@ -238,6 +300,41 @@ test("网页提供本地 URL 播放、完整控制、队列和网络电台", asy
 	assert.match(css, /\.player-progress/);
 	assert.match(css, /\.queue-list/);
 	assert.match(css, /\.station-grid/);
+});
+
+test("播放表单按控件基线对齐并优先展示媒体 URL", async () => {
+	const appSource = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
+	const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
+	assert.ok(appSource.indexOf("media-primary-label\" for=\"player-media-url") < appSource.indexOf("media-secondary-label\" for=\"player-media-title"));
+	assert.match(appSource, /media-primary-control/);
+	assert.match(appSource, /media-secondary-control/);
+	assert.match(appSource, /media-primary-feedback/);
+	assert.match(appSource, /media-secondary-feedback/);
+	assert.match(css, /grid-template-areas: "primary-label secondary-label action-label" "primary-control secondary-control actions" "primary-feedback secondary-feedback action-hints"/);
+	assert.match(css, /width: min\(100%, 1040px\)/);
+});
+
+test("播放易用性提供定时快捷值、URL 工具和操作影响说明", async () => {
+	const appSource = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
+	assert.match(appSource, /\[15, 30, 45, 60\]\.map/);
+	assert.match(appSource, /data-timer-minutes="\$\{minutes\}"/);
+	assert.match(appSource, /data-url-action="paste"/);
+	assert.match(appSource, /data-url-action="clear"/);
+	assert.match(appSource, /替换当前播放/);
+	assert.match(appSource, /添加到队列末尾/);
+	assert.match(appSource, /validateMediaURLInput/);
+	assert.match(appSource, /window\.isSecureContext/);
+});
+
+test("普通、警告和危险按钮使用不同颜色并提供轻量兼容性说明", async () => {
+	const appSource = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
+	const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
+	assert.match(appSource, /<details class="compatibility-note">/);
+	assert.match(appSource, /主要播放路径已完成实机验收/);
+	assert.match(css, /\.button \{[^}]*background: var\(--primary\)/s);
+	assert.match(css, /\.button\.warning \{[^}]*background: var\(--amber\)/s);
+	assert.match(css, /\.button\.danger \{[^}]*background: var\(--red\)/s);
+	assert.match(css, /@media \(max-width: 600px\)[\s\S]*grid-template-areas: "preset-label" "presets" "minute-label" "minute"/);
 });
 
 test("网页显示应用版本并只上传签名更新包", async () => {

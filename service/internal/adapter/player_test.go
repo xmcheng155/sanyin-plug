@@ -132,6 +132,8 @@ type fakePlayerController struct {
 	played                []string
 	volumeSet             bool
 	failStatusAfterVolume bool
+	setVolumeStarted      chan struct{}
+	setVolumeRelease      chan struct{}
 }
 
 func (f *fakePlayerController) Status(_ context.Context) (playerTransport, error) {
@@ -182,6 +184,10 @@ func (f *fakePlayerController) Stop(_ context.Context) error {
 }
 
 func (f *fakePlayerController) SetVolume(_ context.Context, volume int) error {
+	if f.setVolumeStarted != nil {
+		close(f.setVolumeStarted)
+		<-f.setVolumeRelease
+	}
 	f.mu.Lock()
 	f.state.Volume = &volume
 	f.volumeSet = true
@@ -255,6 +261,47 @@ func TestPlaybackManagerSetsVolumeOnlyDuringLocalPlayback(t *testing.T) {
 	controller.setState("stopped")
 	if _, err := manager.control(context.Background(), domain.PlayerCommand{Action: "volume_set", Volume: &requestedVolume}); !errors.Is(err, ErrPlaybackInactive) {
 		t.Fatalf("inactive player accepted volume change: %v", err)
+	}
+}
+
+func TestPlaybackManagerSerializesStatusWhileSettingVolume(t *testing.T) {
+	initialVolume := 30
+	controller := &fakePlayerController{
+		state:            playerTransport{State: "playing", Volume: &initialVolume},
+		setVolumeStarted: make(chan struct{}),
+		setVolumeRelease: make(chan struct{}),
+	}
+	manager := newPlaybackManager(controller, kplayerDiscoveryRunner{}, time.Now)
+	requestedVolume := 25
+	controlDone := make(chan error, 1)
+	go func() {
+		_, err := manager.control(context.Background(), domain.PlayerCommand{Action: "volume_set", Volume: &requestedVolume})
+		controlDone <- err
+	}()
+
+	select {
+	case <-controller.setVolumeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("volume update did not start")
+	}
+
+	statusDone := make(chan error, 1)
+	go func() {
+		_, err := manager.status(context.Background())
+		statusDone <- err
+	}()
+	select {
+	case err := <-statusDone:
+		t.Fatalf("status overlapped the volume transaction: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(controller.setVolumeRelease)
+	if err := <-controlDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-statusDone; err != nil {
+		t.Fatal(err)
 	}
 }
 
