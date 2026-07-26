@@ -78,6 +78,8 @@ const app = {
 	pendingUpdateFile: null,
 	pendingPlayerAction: null,
 	pendingSceneAction: null,
+	pendingLibraryAction: null,
+	mediaLibraryQuery: "",
 	mobileMoreOpen: false,
 	lastUpdatedAt: null,
 	refreshError: null,
@@ -121,6 +123,9 @@ function iconMarkup(name, className = "ui-icon") {
 		party: '<path d="m4 20 4-13 9 9-13 4Z"/><path d="m8 8 8-4M13 13l7-3M17 5l2 2M6 4l2 2M19 14l2 2"/>',
 		sleep: '<path d="M20 15.5A8.5 8.5 0 0 1 8.5 4 8.5 8.5 0 1 0 20 15.5Z"/>',
 		schedule: '<circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/>',
+		favorite: '<path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9L12 3Z"/>',
+		history: '<path d="M4.5 6.5V3m0 3.5H8"/><path d="M4.7 6.3A9 9 0 1 1 3 12"/><path d="M12 7v5l3 2"/>',
+		copy: '<rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>',
 		more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
 		chevron: '<path d="m9 5 7 7-7 7"/>',
 	};
@@ -174,6 +179,10 @@ async function initialize() {
 
 function bindEvents() {
   document.addEventListener("click", (event) => {
+	const activeStationMenu = event.target.closest(".station-more");
+	document.querySelectorAll(".station-more[open]").forEach((details) => {
+		if (details !== activeStationMenu) details.removeAttribute("open");
+	});
     const routeButton = event.target.closest("[data-route]");
     if (routeButton) {
       app.route = routeButton.dataset.route;
@@ -217,6 +226,7 @@ function bindEvents() {
 		if (playerButton) {
 			const action = playerButton.dataset.playerAction;
 			const itemId = playerButton.dataset.itemId || "";
+			playerButton.closest(".station-more")?.removeAttribute("open");
 			if (["queue_clear", "radio_remove"].includes(action)) openPlayerActionConfirmation(action, itemId);
 			else runPlayerAction(action, itemId, playerButton);
 		}
@@ -239,6 +249,16 @@ function bindEvents() {
 		if (timerPreset) applyTimerPreset(timerPreset);
 		const urlUtility = event.target.closest("[data-url-action]");
 		if (urlUtility) handleURLUtility(urlUtility);
+		const libraryButton = event.target.closest("[data-library-action]");
+		if (libraryButton) {
+			const action = libraryButton.dataset.libraryAction;
+			const collection = libraryButton.dataset.libraryCollection || "";
+			const itemId = libraryButton.dataset.itemId || "";
+			if (action === "copy") copyMediaLibrarySource(collection, itemId);
+			else if (action === "clear_history" || (action === "delete" && collection === "favorites")) openMediaLibraryConfirmation(action, collection, itemId);
+			else runMediaLibraryAction(action, collection, itemId, libraryButton);
+		}
+		if (event.target.closest("#confirm-media-library-action")) confirmMediaLibraryAction();
 		const passwordToggle = event.target.closest("[data-action='toggle-password']");
 		if (passwordToggle) togglePasswordVisibility(passwordToggle);
 		if (event.target.closest("[data-action='retry-load']")) loadData();
@@ -266,6 +286,10 @@ function bindEvents() {
 
 	document.addEventListener("input", (event) => {
 		clearFieldError(event.target);
+		if (event.target.id === "media-library-search") {
+			app.mediaLibraryQuery = event.target.value;
+			filterMediaLibraryItems();
+		}
 		if (event.target.id === "player-volume-range") queuePlayerVolume(event.target);
 		if (event.target.id === "scene-volume") {
 			const output = document.querySelector("#scene-volume-value");
@@ -310,6 +334,7 @@ function bindEvents() {
 		if (!app.operationBusy) {
 			app.pendingPlayerAction = null;
 			app.pendingSceneAction = null;
+			app.pendingLibraryAction = null;
 			app.pendingUpdateFile = null;
 		}
 	});
@@ -394,8 +419,8 @@ async function loadData() {
 	updateRefreshStatus();
   renderPage();
   try {
-		const [capabilities, device, status, airplay, network, audio, bluetooth, lighting, schedules, player, scenes, system] = await Promise.all([
-		  api.capabilities(), api.device(), api.status(), api.airplay(), api.network(), api.audio(), api.bluetooth(), api.lighting(), api.schedules(), api.player(), api.scenes(), api.system(),
+		const [capabilities, device, status, airplay, network, audio, bluetooth, lighting, schedules, player, mediaLibrary, scenes, system] = await Promise.all([
+		  api.capabilities(), api.device(), api.status(), api.airplay(), api.network(), api.audio(), api.bluetooth(), api.lighting(), api.schedules(), api.player(), api.mediaLibrary(), api.scenes(), api.system(),
     ]);
     app.data = {
       environment: status.environment,
@@ -410,6 +435,7 @@ async function loadData() {
       lighting: lighting.data,
       schedules: schedules.data,
 		player: player.data,
+		mediaLibrary: mediaLibrary.data,
 		scenes: scenes.data,
 			system: system.data,
     };
@@ -471,6 +497,7 @@ function renderPage() {
 		system: renderSystem,
   };
   elements.content.innerHTML = (pages[app.route] || renderOverview)();
+	if (app.route === "player" && app.mediaLibraryQuery) filterMediaLibraryItems();
 }
 
 function pill(state) {
@@ -774,8 +801,55 @@ function sceneScheduleLastRun(schedule) {
 	return `${labels[schedule.lastRunOutcome] || "上次已执行"} · ${formatSceneScheduleTime(schedule.lastRunAt)}`;
 }
 
+function mediaKindLabel(kind) {
+	return { url: "URL", radio: "电台", scene: "场景" }[kind] || "媒体";
+}
+
+function formatMediaLibraryTime(value) {
+	if (!value) return "时间未知";
+	const date = new Date(value);
+	if (Number.isNaN(date.getTime())) return "时间未知";
+	return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false }).format(date);
+}
+
+function mediaLibraryItemMarkup(item, collection, disabled) {
+	const favorite = collection === "favorites";
+	const timestamp = favorite ? `收藏于 ${formatMediaLibraryTime(item.createdAt)}` : `最近播放 ${formatMediaLibraryTime(item.lastPlayedAt)} · ${Number(item.playCount || 1)} 次`;
+	const search = `${item.title || ""} ${item.source || ""} ${mediaKindLabel(item.kind)}`.toLocaleLowerCase("zh-CN");
+	return `<article class="media-library-item" data-library-item data-library-collection="${collection}" data-search="${escapeHTML(search)}">
+		<span class="media-library-icon">${iconMarkup(favorite ? "favorite" : "history")}</span>
+		<div class="media-library-copy"><div><strong>${escapeHTML(item.title)}</strong><span class="media-kind">${escapeHTML(mediaKindLabel(item.kind))}</span></div><small title="${escapeHTML(item.source)}">${escapeHTML(item.source)}</small><span>${escapeHTML(timestamp)}</span></div>
+		<div class="media-library-actions"><button class="button compact" data-library-action="play" data-library-collection="${collection}" data-item-id="${escapeHTML(item.id)}" type="button" ${disabled ? "disabled" : ""}>播放</button><button class="button secondary compact" data-library-action="queue" data-library-collection="${collection}" data-item-id="${escapeHTML(item.id)}" type="button" ${disabled ? "disabled" : ""}>入队</button>${favorite ? "" : `<button class="button secondary compact" data-library-action="favorite" data-library-collection="history" data-item-id="${escapeHTML(item.id)}" type="button" ${disabled ? "disabled" : ""}>收藏</button>`}<button class="icon-button compact-icon" data-library-action="copy" data-library-collection="${collection}" data-item-id="${escapeHTML(item.id)}" type="button" aria-label="复制 ${escapeHTML(item.title)} 的公开地址">${iconMarkup("copy")}</button><button class="icon-button compact-icon danger-icon" data-library-action="delete" data-library-collection="${collection}" data-item-id="${escapeHTML(item.id)}" type="button" aria-label="删除 ${escapeHTML(item.title)}" ${disabled ? "disabled" : ""}>×</button></div>
+	</article>`;
+}
+
+function mediaLibraryColumnMarkup(title, description, collection, items, limit, disabled) {
+	const markup = items.length ? items.map((item) => mediaLibraryItemMarkup(item, collection, disabled)).join("") : `<div class="empty-state compact-empty">${collection === "favorites" ? "还没有收藏，可从播放 URL、播放历史或网络电台添加。" : "播放成功后会自动出现在这里。"}</div>`;
+	return `<section class="media-library-column" data-library-list="${collection}"><div class="media-library-column-header"><div><h3>${escapeHTML(title)}</h3><p>${escapeHTML(description)}</p></div><span>${items.length} / ${limit}</span></div><div class="media-library-list">${markup}<div class="empty-state compact-empty library-filter-empty" hidden>没有符合当前搜索的条目。</div></div></section>`;
+}
+
+function stationMediaFavorite(station) {
+	return (app.data?.mediaLibrary?.favorites || []).find((item) => item.kind === "radio" && item.source === station.source);
+}
+
+function filterMediaLibraryItems() {
+	const query = app.mediaLibraryQuery.trim().toLocaleLowerCase("zh-CN");
+	document.querySelectorAll("[data-library-list]").forEach((list) => {
+		const items = [...list.querySelectorAll("[data-library-item]")];
+		let visible = 0;
+		items.forEach((item) => {
+			const matched = !query || (item.dataset.search || "").includes(query);
+			item.hidden = !matched;
+			if (matched) visible += 1;
+		});
+		const empty = list.querySelector(".library-filter-empty");
+		if (empty) empty.hidden = !query || items.length === 0 || visible > 0;
+	});
+}
+
 function renderPlayer() {
 	const player = app.data.player;
+	const mediaLibrary = app.data.mediaLibrary || { favorites: [], history: [], favoriteLimit: 100, historyLimit: 100 };
 	const scenes = app.data.scenes || [];
 	const capability = actionPresentation(app.data.capabilityMap["player.localPlayback"]);
 	const transport = String(player.transport?.value || "unknown");
@@ -815,10 +889,16 @@ function renderPlayer() {
 			<div class="queue-actions"><button class="button secondary compact" data-player-action="queue_play" data-item-id="${escapeHTML(item.id)}" type="button" ${capability.disabled ? "disabled" : ""}>播放</button><button class="icon-button compact-icon danger-icon" data-player-action="queue_remove" data-item-id="${escapeHTML(item.id)}" type="button" aria-label="移除 ${escapeHTML(item.title)}" ${removeDisabled ? "disabled" : ""}>×</button></div>
 		</div>`;
 	}).join("") : `<div class="empty-state compact-empty">播放队列为空，可从 URL 或网络电台加入。</div>`;
-	const stations = player.stations.length ? player.stations.map((station, index) => `<article class="station-card">
-		<span class="station-icon">${iconMarkup("airplay")}</span><div><strong>${escapeHTML(station.name)}</strong><small>${escapeHTML(station.source)}</small></div>
-		<div class="station-actions"><span class="station-order-actions"><button class="icon-button compact-icon" data-player-action="radio_move_up" data-item-id="${escapeHTML(station.id)}" type="button" aria-label="上移 ${escapeHTML(station.name)}" ${capability.disabled || index === 0 ? "disabled" : ""}>↑</button><button class="icon-button compact-icon" data-player-action="radio_move_down" data-item-id="${escapeHTML(station.id)}" type="button" aria-label="下移 ${escapeHTML(station.name)}" ${capability.disabled || index === player.stations.length - 1 ? "disabled" : ""}>↓</button></span><button class="button compact" data-player-action="radio_play" data-item-id="${escapeHTML(station.id)}" type="button" ${capability.disabled ? "disabled" : ""}>播放</button><button class="button secondary compact" data-player-action="radio_queue" data-item-id="${escapeHTML(station.id)}" type="button" ${capability.disabled ? "disabled" : ""}>加入队列</button><button class="icon-button compact-icon danger-icon" data-player-action="radio_remove" data-item-id="${escapeHTML(station.id)}" type="button" aria-label="删除 ${escapeHTML(station.name)}" ${capability.disabled ? "disabled" : ""}>×</button></div>
-	</article>`).join("") : `<div class="empty-state compact-empty">尚未收藏网络电台。</div>`;
+	const stations = player.stations.length ? player.stations.map((station, index) => {
+		const favorite = stationMediaFavorite(station);
+		const moreLabel = `更多操作：${station.name}`;
+		const moreTrigger = iconMarkup("more");
+		const moreActions = capability.disabled ? `<button class="icon-button station-more-trigger" type="button" aria-label="${escapeHTML(moreLabel)}" title="更多操作" disabled>${moreTrigger}</button>` : `<details class="station-more"><summary class="icon-button station-more-trigger" aria-label="${escapeHTML(moreLabel)}" title="更多操作">${moreTrigger}</summary><div class="station-more-menu" aria-label="${escapeHTML(station.name)}的更多操作"><button class="station-menu-action" data-player-action="radio_favorite" data-item-id="${escapeHTML(station.id)}" type="button" ${favorite ? "disabled" : ""}>${favorite ? "★ 已在媒体库" : "☆ 收藏到媒体库"}</button><button class="station-menu-action" data-player-action="radio_queue" data-item-id="${escapeHTML(station.id)}" type="button">加入队列</button><button class="station-menu-action" data-player-action="radio_move_up" data-item-id="${escapeHTML(station.id)}" type="button" ${index === 0 ? "disabled" : ""}>上移一位</button><button class="station-menu-action" data-player-action="radio_move_down" data-item-id="${escapeHTML(station.id)}" type="button" ${index === player.stations.length - 1 ? "disabled" : ""}>下移一位</button><button class="station-menu-action danger" data-player-action="radio_remove" data-item-id="${escapeHTML(station.id)}" type="button">删除电台</button></div></details>`;
+		return `<article class="station-card">
+			<span class="station-icon">${iconMarkup("airplay")}</span><div class="station-copy"><strong>${escapeHTML(station.name)}</strong><small>${escapeHTML(station.source)}</small></div>
+			<div class="station-actions"><button class="button compact" data-player-action="radio_play" data-item-id="${escapeHTML(station.id)}" type="button" ${capability.disabled ? "disabled" : ""}>播放</button>${moreActions}</div>
+		</article>`;
+	}).join("") : `<div class="empty-state compact-empty">尚未收藏网络电台。</div>`;
 	return `
 		${sectionHeading("场景模式", "可手动启动，也可按音箱时间自动播放并同步音量与停止设置", `${scenes.length} / 20`)}
 		<section class="panel scene-panel">
@@ -865,15 +945,21 @@ function renderPlayer() {
 			<form id="player-url-form" class="media-form player-media-form" novalidate>
 				<label class="media-field-label media-primary-label" for="player-media-url">媒体 URL</label>
 				<label class="media-field-label media-secondary-label" for="player-media-title">标题（可选）</label>
-				<span class="media-field-label media-action-label">播放方式</span>
+				<span class="media-field-label media-action-label">播放与保存</span>
 				<div class="url-input-group media-primary-control"><input class="text-input" id="player-media-url" name="url" type="url" maxlength="2048" required placeholder="https://media.example/music.mp3" autocomplete="off" spellcheck="false" aria-describedby="player-media-url-error" data-media-url><button class="input-utility-button" data-url-action="paste" type="button">粘贴</button><button class="input-utility-button" data-url-action="clear" type="button">清空</button></div>
 				<input class="text-input media-secondary-control" id="player-media-title" name="title" type="text" maxlength="100" placeholder="例如：客厅歌单" aria-describedby="player-media-title-hint">
-				<div class="media-form-actions"><button class="button" data-submit-action="play_url" type="submit" ${capability.disabled ? "disabled" : ""}>立即播放</button><button class="button secondary" data-submit-action="queue_add" type="submit" ${capability.disabled ? "disabled" : ""}>加入队列</button></div>
+				<div class="media-form-actions"><button class="button" data-submit-action="play_url" type="submit" ${capability.disabled ? "disabled" : ""}>立即播放</button><button class="button secondary" data-submit-action="queue_add" type="submit" ${capability.disabled ? "disabled" : ""}>加入队列</button><button class="button secondary" data-submit-action="favorite_url" type="submit" ${capability.disabled ? "disabled" : ""}>收藏 URL</button></div>
 				<small id="player-media-url-error" class="field-error media-primary-feedback" aria-live="polite"></small>
 				<small id="player-media-title-hint" class="field-hint media-secondary-feedback">用于播放状态和队列识别</small>
-				<div class="media-action-hints"><span>替换当前播放</span><span>添加到队列末尾</span></div>
+				<div class="media-action-hints"><span>替换当前播放</span><span>添加到队列末尾</span><span>保存到音箱本机</span></div>
 				<p class="form-error" role="alert"></p>
 			</form>
+		</section>
+		${sectionHeading("媒体库", "集中管理 URL、电台收藏与最近播放；搜索同时匹配标题、类型和公开地址", `${mediaLibrary.favorites.length} 个收藏 · ${mediaLibrary.history.length} 条历史`)}
+		<section class="panel media-library-panel">
+			<div class="media-library-toolbar"><label for="media-library-search"><span>搜索媒体库</span><div class="library-search-control"><span aria-hidden="true">⌕</span><input class="text-input" id="media-library-search" type="search" value="${escapeHTML(app.mediaLibraryQuery)}" placeholder="搜索标题或 URL" autocomplete="off"></div></label><div><button class="button secondary compact" data-library-action="clear_history" type="button" ${capability.disabled || mediaLibrary.history.length === 0 ? "disabled" : ""}>清空播放历史</button><small>历史最多 ${mediaLibrary.historyLimit} 条</small></div></div>
+			<div class="media-library-privacy"><span aria-hidden="true">i</span><p><strong>私密参数只保存在音箱本机</strong> 页面展示和复制的是公开地址；播放与入队通过条目 ID 使用完整保存地址。</p></div>
+			<div class="media-library-grid">${mediaLibraryColumnMarkup("我的收藏", "URL 与电台统一管理，可直接播放或加入队列", "favorites", mediaLibrary.favorites, mediaLibrary.favoriteLimit, capability.disabled)}${mediaLibraryColumnMarkup("播放历史", "媒体确认开始播放后自动记录", "history", mediaLibrary.history, mediaLibrary.historyLimit, capability.disabled)}</div>
 		</section>
 		${sectionHeading("播放队列", "当前项结束后自动播放下一项", `${player.queue.length} 项`)}
 		<section class="panel"><div class="queue-list">${queue}</div><div class="action-row"><button class="button danger" data-player-action="queue_clear" type="button" ${capability.disabled || player.queue.length === 0 ? "disabled" : ""}>停止并清空队列</button></div></section>
@@ -1100,6 +1186,7 @@ async function applyPlayerScene() {
 	try {
 		const response = await api.applyScene(pending.sceneId);
 		app.data.player = response.data.player;
+		await refreshMediaLibraryState();
 		app.pendingSceneAction = null;
 		elements.dialogContent.innerHTML = `<span class="dialog-kicker">PLAYER SCENE</span><h2>“${escapeHTML(response.data.scene.name)}”已启动</h2><p>播放器已确认媒体、音量和定时状态。</p><div class="operation-timeline"><div class="operation-step complete"><span class="step-dot">✓</span><span>播放已替换为 ${escapeHTML(response.data.scene.title)}</span></div><div class="operation-step complete"><span class="step-dot">✓</span><span>音量已回读为 ${escapeHTML(response.data.scene.volume)}%</span></div><div class="operation-step complete"><span class="step-dot">✓</span><span>${response.data.scene.timerMinutes > 0 ? `已设置 ${escapeHTML(response.data.scene.timerMinutes)} 分钟后停止` : "已取消旧定时并持续播放"}</span></div></div><div class="dialog-actions"><button class="button" value="done">完成</button></div>`;
 		finishDialogOperation();
@@ -1152,7 +1239,7 @@ async function refreshPlayer() {
 	try {
 		const response = await api.player();
 		app.data.player = response.data;
-		if (app.route === "player" && document.activeElement?.id !== "player-volume-range") renderPage();
+		if (app.route === "player" && !document.activeElement?.matches("input, textarea, select") && !document.querySelector(".station-more[open]")) renderPage();
 	} catch (error) {
 		if (app.route === "player") console.warn("播放器状态刷新失败", error);
 	} finally {
@@ -1160,13 +1247,25 @@ async function refreshPlayer() {
 	}
 }
 
+async function refreshMediaLibraryState() {
+	try {
+		const response = await api.mediaLibrary();
+		app.data.mediaLibrary = response.data;
+		return true;
+	} catch (error) {
+		console.warn("媒体库刷新失败", error);
+		return false;
+	}
+}
+
 async function refreshScenes() {
 	if (!app.data || app.environment !== "device" || app.sceneRefreshing) return;
 	app.sceneRefreshing = true;
 	try {
-		const response = await api.scenes();
-		app.data.scenes = response.data;
-		if (app.route === "player") renderPage();
+		const [sceneResponse, libraryResponse] = await Promise.all([api.scenes(), api.mediaLibrary()]);
+		app.data.scenes = sceneResponse.data;
+		app.data.mediaLibrary = libraryResponse.data;
+		if (app.route === "player" && !document.activeElement?.matches("input, textarea, select") && !document.querySelector(".station-more[open]")) renderPage();
 	} catch (error) {
 		if (app.route === "player") console.warn("场景计划刷新失败", error);
 	} finally {
@@ -1175,6 +1274,10 @@ async function refreshScenes() {
 }
 
 async function runPlayerAction(action, itemId = "", trigger = null) {
+	if (action === "radio_favorite") {
+		await favoriteRadioStation(itemId, trigger);
+		return;
+	}
 	const previousLabel = trigger?.textContent || "";
 	if (trigger) {
 		trigger.disabled = true;
@@ -1184,6 +1287,9 @@ async function runPlayerAction(action, itemId = "", trigger = null) {
 	try {
 		const response = await api.controlPlayer(action, itemId ? { itemId } : {});
 		app.data.player = response.data;
+		if (["next", "queue_play", "radio_play"].includes(action)) {
+			await refreshMediaLibraryState();
+		}
 		renderPage();
 		toast(action === "timer_cancel" ? "定时停止已取消" : "播放器操作已完成并回读状态", "success");
 	} catch (error) {
@@ -1192,6 +1298,33 @@ async function runPlayerAction(action, itemId = "", trigger = null) {
 			trigger.disabled = false;
 			trigger.removeAttribute("aria-busy");
 			if (!trigger.classList.contains("icon-button")) trigger.textContent = previousLabel;
+		}
+	}
+}
+
+async function favoriteRadioStation(itemId, trigger = null) {
+	const station = app.data.player.stations.find((item) => item.id === itemId);
+	if (!station) {
+		toast("网络电台不存在或已被删除", "error");
+		return;
+	}
+	const previousLabel = trigger?.textContent || "";
+	if (trigger) {
+		trigger.disabled = true;
+		trigger.setAttribute("aria-busy", "true");
+		trigger.textContent = "正在收藏…";
+	}
+	try {
+		const response = await api.createMediaFavorite({ radioStationId: itemId });
+		app.data.mediaLibrary = response.data;
+		renderPage();
+		toast(`“${station.name}”已收藏到媒体库`, "success");
+	} catch (error) {
+		toast(error.message, "error");
+		if (trigger) {
+			trigger.disabled = false;
+			trigger.removeAttribute("aria-busy");
+			trigger.textContent = previousLabel;
 		}
 	}
 }
@@ -1331,16 +1464,116 @@ async function submitPlayerURL(event) {
 		form.elements.url.focus();
 		return;
 	}
-	setFormBusy(form, true, action === "play_url" ? "正在播放…" : "正在加入…");
+	const busyLabels = { play_url: "正在播放…", queue_add: "正在加入…", favorite_url: "正在收藏…" };
+	setFormBusy(form, true, busyLabels[action] || "处理中…");
 	try {
-		const response = await api.controlPlayer(action, { title, url });
-		app.data.player = response.data;
+		if (action === "favorite_url") {
+			const response = await api.createMediaFavorite({ title, url });
+			app.data.mediaLibrary = response.data;
+		} else {
+			const response = await api.controlPlayer(action, { title, url });
+			app.data.player = response.data;
+			if (action === "play_url") {
+				await refreshMediaLibraryState();
+			}
+		}
 		form.reset();
 		renderPage();
-		toast(action === "play_url" ? "已开始播放" : "已加入播放队列", "success");
+		toast(action === "play_url" ? "已开始播放并记录历史" : action === "queue_add" ? "已加入播放队列" : "URL 已收藏到音箱", "success");
 	} catch (error) {
 		setFormBusy(form, false);
 		setFormError(form, error.message);
+	}
+}
+
+function mediaLibraryItem(collection, itemId) {
+	const items = collection === "favorites" ? app.data?.mediaLibrary?.favorites : app.data?.mediaLibrary?.history;
+	return (items || []).find((item) => item.id === itemId);
+}
+
+async function copyMediaLibrarySource(collection, itemId) {
+	const item = mediaLibraryItem(collection, itemId);
+	if (!item) {
+		toast("媒体库条目不存在或已被删除", "error");
+		return;
+	}
+	try {
+		if (!navigator.clipboard?.writeText) throw new Error("clipboard_unavailable");
+		await navigator.clipboard.writeText(item.source);
+		toast("公开地址已复制；私密参数未包含", "success");
+	} catch {
+		window.prompt("复制公开地址（不包含私密参数）：", item.source);
+	}
+}
+
+async function runMediaLibraryAction(action, collection, itemId, trigger = null) {
+	const previousLabel = trigger?.textContent || "";
+	if (trigger) {
+		trigger.disabled = true;
+		trigger.setAttribute("aria-busy", "true");
+		if (!trigger.classList.contains("icon-button")) trigger.textContent = "处理中…";
+	}
+	try {
+		if (action === "play" || action === "queue") {
+			const response = await api.controlMediaLibraryItem(collection, itemId, action);
+			app.data.player = response.data;
+			if (action === "play") {
+				await refreshMediaLibraryState();
+			}
+		} else if (action === "favorite") {
+			const response = await api.createMediaFavorite({ historyId: itemId });
+			app.data.mediaLibrary = response.data;
+		} else if (action === "delete" && collection === "history") {
+			const response = await api.deleteMediaHistory(itemId);
+			app.data.mediaLibrary = response.data;
+		} else {
+			throw new Error("不支持的媒体库操作");
+		}
+		renderPage();
+		toast(action === "play" ? "已开始播放并更新历史" : action === "queue" ? "已加入播放队列" : action === "favorite" ? "已加入 URL 收藏" : "播放历史已删除", "success");
+	} catch (error) {
+		toast(error.message, "error");
+		if (trigger) {
+			trigger.disabled = false;
+			trigger.removeAttribute("aria-busy");
+			if (!trigger.classList.contains("icon-button")) trigger.textContent = previousLabel;
+		}
+	}
+}
+
+function openMediaLibraryConfirmation(action, collection = "", itemId = "") {
+	const clearing = action === "clear_history";
+	const item = clearing ? null : mediaLibraryItem(collection, itemId);
+	if (!clearing && !item) {
+		toast("媒体库条目不存在或已被删除", "error");
+		return;
+	}
+	app.pendingLibraryAction = { action, collection, itemId };
+	elements.dialogContent.innerHTML = `
+		<span class="dialog-kicker">MEDIA LIBRARY</span>
+		<h2>${clearing ? "清空全部播放历史？" : `删除“${escapeHTML(item.title)}”？`}</h2>
+		<p>${clearing ? `将删除 ${app.data.mediaLibrary.history.length} 条设备端播放记录，URL 收藏不会受到影响。` : "该收藏可能包含页面未展示的私密查询参数，删除后无法从公开地址恢复这些参数。"}</p>
+		<div class="capability-callout"><strong>此操作不可撤销</strong><span>${clearing ? "新的成功播放仍会继续自动记录。" : "不会停止当前播放，也不会删除已有播放历史。"}</span></div>
+		<div class="dialog-actions"><button class="button secondary" value="cancel">取消</button><button id="confirm-media-library-action" class="button danger" type="button">确认${clearing ? "清空" : "删除"}</button></div>`;
+	setDialogBusy(false);
+	elements.dialog.showModal();
+}
+
+async function confirmMediaLibraryAction() {
+	const pending = app.pendingLibraryAction;
+	if (!pending) return;
+	app.pendingLibraryAction = null;
+	const clearing = pending.action === "clear_history";
+	showOperationLoading("MEDIA LIBRARY", clearing ? "正在清空播放历史" : "正在删除 URL 收藏", "等待音箱完成原子写入…", ["发送删除请求", "更新本机媒体库", "回读最新列表"]);
+	try {
+		const response = clearing ? await api.clearMediaHistory() : await api.deleteMediaFavorite(pending.itemId);
+		app.data.mediaLibrary = response.data;
+		elements.dialogContent.innerHTML = `<span class="dialog-kicker">MEDIA LIBRARY</span><h2>${clearing ? "播放历史已清空" : "URL 收藏已删除"}</h2><p>音箱已返回最新媒体库列表。</p><div class="dialog-actions"><button class="button" value="done">完成</button></div>`;
+		finishDialogOperation();
+		renderPage();
+	} catch (error) {
+		elements.dialogContent.innerHTML = `<span class="dialog-kicker">MEDIA LIBRARY</span><h2>操作未完成</h2><p>${escapeHTML(error.message)}</p><div class="dialog-actions"><button class="button secondary" value="done">关闭</button></div>`;
+		finishDialogOperation();
 	}
 }
 

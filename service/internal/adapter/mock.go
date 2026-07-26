@@ -240,6 +240,37 @@ func (m *MockAdapter) ControlPlayer(_ context.Context, _ domain.PlayerCommand) (
 	return domain.Player{}, errors.New("real KPlayer control is unavailable in mock mode")
 }
 
+func (m *MockAdapter) MediaLibrary(_ context.Context) (domain.MediaLibrary, error) {
+	createdAt := m.now().Add(-48 * time.Hour)
+	lastPlayedAt := m.now().Add(-12 * time.Minute)
+	return domain.MediaLibrary{
+		Favorites:     []domain.MediaLibraryItem{{ID: "mock-favorite-1", Title: "午后轻音乐", Source: "https://media.example/afternoon.mp3", Kind: "url", CreatedAt: &createdAt}},
+		History:       []domain.MediaLibraryItem{{ID: "mock-history-1", Title: "网络电台示例", Source: "https://radio.example/live.mp3", Kind: "radio", LastPlayedAt: &lastPlayedAt, PlayCount: 3}},
+		FavoriteLimit: 100,
+		HistoryLimit:  100,
+	}, nil
+}
+
+func (m *MockAdapter) CreateMediaFavorite(_ context.Context, _ domain.MediaFavoriteInput) (domain.MediaLibrary, error) {
+	return domain.MediaLibrary{}, errors.New("media library writes are unavailable in mock mode")
+}
+
+func (m *MockAdapter) DeleteMediaFavorite(_ context.Context, _ string) (domain.MediaLibrary, error) {
+	return domain.MediaLibrary{}, errors.New("media library writes are unavailable in mock mode")
+}
+
+func (m *MockAdapter) DeleteMediaHistory(_ context.Context, _ string) (domain.MediaLibrary, error) {
+	return domain.MediaLibrary{}, errors.New("media library writes are unavailable in mock mode")
+}
+
+func (m *MockAdapter) ClearMediaHistory(_ context.Context) (domain.MediaLibrary, error) {
+	return domain.MediaLibrary{}, errors.New("media library writes are unavailable in mock mode")
+}
+
+func (m *MockAdapter) ControlMediaLibraryItem(_ context.Context, _, _, _ string) (domain.Player, error) {
+	return domain.Player{}, errors.New("media library writes are unavailable in mock mode")
+}
+
 func (m *MockAdapter) PlayerScenes(_ context.Context) ([]domain.PlayerScene, error) {
 	return []domain.PlayerScene{
 		{ID: "mock-scene-focus", Name: "专注阅读", Icon: "focus", Title: "局域网音乐示例", Source: "http://media.example/music.mp3", Volume: 24, TimerMinutes: 45, Schedule: domain.PlayerSceneSchedule{Enabled: false, Time: "07:30", Weekdays: []int{1, 2, 3, 4, 5, 6, 7}}},

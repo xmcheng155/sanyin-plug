@@ -580,6 +580,48 @@ func (m *RealAdapter) ControlPlayer(ctx context.Context, command domain.PlayerCo
 	return m.playback.control(ctx, command)
 }
 
+func (m *RealAdapter) MediaLibrary(ctx context.Context) (domain.MediaLibrary, error) {
+	if m.playback == nil {
+		return domain.MediaLibrary{}, ErrCapabilityNotReady
+	}
+	return m.playback.mediaLibrary(ctx)
+}
+
+func (m *RealAdapter) CreateMediaFavorite(ctx context.Context, input domain.MediaFavoriteInput) (domain.MediaLibrary, error) {
+	if m.playback == nil {
+		return domain.MediaLibrary{}, ErrCapabilityNotReady
+	}
+	return m.playback.createMediaFavorite(ctx, input)
+}
+
+func (m *RealAdapter) DeleteMediaFavorite(ctx context.Context, id string) (domain.MediaLibrary, error) {
+	if m.playback == nil {
+		return domain.MediaLibrary{}, ErrCapabilityNotReady
+	}
+	return m.playback.deleteMediaFavorite(ctx, id)
+}
+
+func (m *RealAdapter) DeleteMediaHistory(ctx context.Context, id string) (domain.MediaLibrary, error) {
+	if m.playback == nil {
+		return domain.MediaLibrary{}, ErrCapabilityNotReady
+	}
+	return m.playback.deleteMediaHistory(ctx, id)
+}
+
+func (m *RealAdapter) ClearMediaHistory(ctx context.Context) (domain.MediaLibrary, error) {
+	if m.playback == nil {
+		return domain.MediaLibrary{}, ErrCapabilityNotReady
+	}
+	return m.playback.clearMediaHistory(ctx)
+}
+
+func (m *RealAdapter) ControlMediaLibraryItem(ctx context.Context, collection, id, action string) (domain.Player, error) {
+	if m.playback == nil {
+		return domain.Player{}, ErrCapabilityNotReady
+	}
+	return m.playback.controlMediaLibraryItem(ctx, collection, id, action)
+}
+
 func (m *RealAdapter) PlayerScenes(ctx context.Context) ([]domain.PlayerScene, error) {
 	if m.playback == nil {
 		return nil, ErrCapabilityNotReady

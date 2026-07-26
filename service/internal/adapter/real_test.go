@@ -89,6 +89,14 @@ func (r *recordingRunner) WriteDeviceFile(_ context.Context, filename string, co
 	return nil
 }
 
+func (r *recordingRunner) ReadDeviceFile(_ context.Context, filename string) ([]byte, error) {
+	content, ok := r.files[filename]
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+	return append([]byte(nil), content...), nil
+}
+
 func (r *recordingRunner) RemoveDeviceFile(filename string) error {
 	delete(r.files, filename)
 	return nil

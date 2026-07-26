@@ -172,6 +172,30 @@ type PlayerCommand struct {
 	Volume          *int
 }
 
+type MediaLibraryItem struct {
+	ID           string     `json:"id"`
+	Title        string     `json:"title"`
+	Source       string     `json:"source"`
+	Kind         string     `json:"kind"`
+	CreatedAt    *time.Time `json:"createdAt,omitempty"`
+	LastPlayedAt *time.Time `json:"lastPlayedAt,omitempty"`
+	PlayCount    int        `json:"playCount,omitempty"`
+}
+
+type MediaLibrary struct {
+	Favorites     []MediaLibraryItem `json:"favorites"`
+	History       []MediaLibraryItem `json:"history"`
+	FavoriteLimit int                `json:"favoriteLimit"`
+	HistoryLimit  int                `json:"historyLimit"`
+}
+
+type MediaFavoriteInput struct {
+	Title          string `json:"title"`
+	URL            string `json:"url"`
+	HistoryID      string `json:"historyId"`
+	RadioStationID string `json:"radioStationId"`
+}
+
 type PlayerScene struct {
 	ID           string              `json:"id"`
 	Name         string              `json:"name"`

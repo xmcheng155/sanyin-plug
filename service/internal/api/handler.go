@@ -301,6 +301,78 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if path == BasePath+"/media-library/favorites" && r.Method == http.MethodPost {
+		if h.provider.Environment() == "mock" {
+			h.notReady(w)
+			return
+		}
+		var input domain.MediaFavoriteInput
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&input); err != nil {
+			h.writeError(w, http.StatusBadRequest, "invalid_request", "收藏必须包含媒体 URL、播放历史 historyId 或网络电台 radioStationId 三者之一")
+			return
+		}
+		if err := decoder.Decode(&struct{}{}); err != io.EOF {
+			h.writeError(w, http.StatusBadRequest, "invalid_request", "请求只能包含一个 JSON 对象")
+			return
+		}
+		library, err := device.CreateMediaFavorite(r.Context(), input)
+		if h.writeMediaLibraryError(w, err) {
+			return
+		}
+		h.writeJSON(w, http.StatusCreated, domain.Envelope[domain.MediaLibrary]{Environment: h.provider.Environment(), Scenario: scenario, Data: library})
+		return
+	}
+
+	if path == BasePath+"/media-library/history" && r.Method == http.MethodDelete {
+		if h.provider.Environment() == "mock" {
+			h.notReady(w)
+			return
+		}
+		library, err := device.ClearMediaHistory(r.Context())
+		if h.writeMediaLibraryError(w, err) {
+			return
+		}
+		h.writeJSON(w, http.StatusOK, domain.Envelope[domain.MediaLibrary]{Environment: h.provider.Environment(), Scenario: scenario, Data: library})
+		return
+	}
+
+	if strings.HasPrefix(path, BasePath+"/media-library/") {
+		relative := strings.TrimPrefix(path, BasePath+"/media-library/")
+		parts := strings.Split(relative, "/")
+		if len(parts) == 2 && parts[1] != "" && r.Method == http.MethodDelete && (parts[0] == "favorites" || parts[0] == "history") {
+			if h.provider.Environment() == "mock" {
+				h.notReady(w)
+				return
+			}
+			var library domain.MediaLibrary
+			var err error
+			if parts[0] == "favorites" {
+				library, err = device.DeleteMediaFavorite(r.Context(), parts[1])
+			} else {
+				library, err = device.DeleteMediaHistory(r.Context(), parts[1])
+			}
+			if h.writeMediaLibraryError(w, err) {
+				return
+			}
+			h.writeJSON(w, http.StatusOK, domain.Envelope[domain.MediaLibrary]{Environment: h.provider.Environment(), Scenario: scenario, Data: library})
+			return
+		}
+		if len(parts) == 3 && parts[1] != "" && r.Method == http.MethodPost && (parts[0] == "favorites" || parts[0] == "history") && (parts[2] == "play" || parts[2] == "queue") {
+			if h.provider.Environment() == "mock" {
+				h.notReady(w)
+				return
+			}
+			player, err := device.ControlMediaLibraryItem(r.Context(), parts[0], parts[1], parts[2])
+			if h.writeMediaLibraryError(w, err) {
+				return
+			}
+			h.writeJSON(w, http.StatusOK, domain.Envelope[domain.Player]{Environment: h.provider.Environment(), Scenario: scenario, Data: player})
+			return
+		}
+	}
+
 	if path == BasePath+"/scenes" && r.Method == http.MethodPost {
 		if h.provider.Environment() == "mock" {
 			h.notReady(w)
@@ -459,6 +531,25 @@ func (h *Handler) writePlayerSceneError(w http.ResponseWriter, err error) bool {
 	return true
 }
 
+func (h *Handler) writeMediaLibraryError(w http.ResponseWriter, err error) bool {
+	if err == nil {
+		return false
+	}
+	switch {
+	case errors.Is(err, adapter.ErrCapabilityNotReady):
+		h.notReady(w)
+	case errors.Is(err, adapter.ErrInvalidInput):
+		h.writeError(w, http.StatusBadRequest, "invalid_request", "媒体地址必须为有效的 HTTP/HTTPS URL，标题最长 100 个字符；收藏来源必须是 URL、播放历史或网络电台三者之一")
+	case errors.Is(err, adapter.ErrNotFound):
+		h.writeError(w, http.StatusNotFound, "media_library_item_not_found", "媒体库条目或网络电台不存在，可能已被删除")
+	case errors.Is(err, adapter.ErrConflict):
+		h.writeError(w, http.StatusConflict, "media_favorite_limit_reached", "最多保存 100 个 URL 收藏，请先删除不再使用的条目")
+	default:
+		h.internalError(w)
+	}
+	return true
+}
+
 func (h *Handler) adapterForRequest(w http.ResponseWriter, r *http.Request) (adapter.DeviceAdapter, string, bool) {
 	scenario := r.URL.Query().Get("scenario")
 	if scenario == "" || h.provider.Environment() != "mock" {
@@ -502,6 +593,8 @@ func (h *Handler) handleRead(w http.ResponseWriter, r *http.Request, path, scena
 		value, err = device.Schedules(ctx)
 	case BasePath + "/player":
 		value, err = device.Player(ctx)
+	case BasePath + "/media-library":
+		value, err = device.MediaLibrary(ctx)
 	case BasePath + "/scenes":
 		value, err = device.PlayerScenes(ctx)
 	default:

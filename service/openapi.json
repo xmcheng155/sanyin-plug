@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "三音本地配置服务 API",
-	"version": "1.9.0",
-	"description": "同一套契约支持 Mock 与真实设备模式；真实设备开放 AirPlay、安全局域网状态读取、KPlayer 本地 URL/队列/网络电台播放、0..100 音量回读调节、最长 60 分钟的设备端定时停止，以及支持按音箱时间自动启动的持久化播放器场景。自动启动支持自定义星期、防同分钟重复与重叠计划冲突校验。系统接口还提供带设备验收或自动回退的实验性蓝牙、EQ 与 Wi-Fi 配置，以及经过 Ed25519 签名、平台与哈希校验、健康检查和自动回滚的单文件更新。"
+	"version": "2.0.0",
+	"description": "同一套契约支持 Mock 与真实设备模式；真实设备开放 AirPlay、安全局域网状态读取、KPlayer 本地 URL/队列/网络电台播放、0..100 音量回读调节、最长 60 分钟的设备端定时停止，以及支持按音箱时间自动启动的持久化播放器场景。设备端媒体库提供自动合并的播放历史、URL 与网络电台收藏、搜索所需的脱敏元数据，以及按条目 ID 播放和入队；完整 URL 始终只保存在音箱本机。系统接口还提供带设备验收或自动回退的实验性蓝牙、EQ 与 Wi-Fi 配置，以及经过 Ed25519 签名、平台与哈希校验、健康检查和自动回滚的单文件更新。"
   },
   "servers": [{ "url": "/api/v1" }],
   "paths": {
@@ -19,6 +19,11 @@
     "/schedules": { "get": { "summary": "读取计划任务诊断快照", "parameters": [{ "$ref": "#/components/parameters/Scenario" }], "responses": { "200": { "$ref": "#/components/responses/JSONEnvelope" } } } },
     "/player": { "get": { "summary": "读取 KPlayer 播放状态、音量、进度、队列、网络电台与定时停止状态", "parameters": [{ "$ref": "#/components/parameters/Scenario" }], "responses": { "200": { "description": "脱敏后的播放器状态", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } } } } } },
     "/player/control": { "post": { "summary": "控制本地播放、音量、队列、网络电台与定时停止", "description": "真实设备通过标准 UPnP AVTransport 与 RenderingControl 调用原厂 KPlayer。volume_set 接受 0..100 的 volume，仅在本地播放中执行并回读验证，暂停或停止时拒绝；radio_move_up 和 radio_move_down 携带 itemId 调整并持久化电台顺序；timer_set 接受 1..60 的 durationMinutes 并由音箱端服务到时停止，timer_cancel 取消。完整媒体 URL 只用于设备拉流；响应中的 source 会删除查询参数和用户信息。", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PlayerCommand" } } } }, "responses": { "200": { "description": "控制完成并回读后的播放器状态", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } } }, "400": { "description": "action、媒体 URL、标题、音量或定时范围无效" }, "404": { "description": "队列项或电台不存在" }, "409": { "description": "Mock 能力未开放、播放器未激活，或当前播放项存在操作冲突" } } } },
+	"/media-library": { "get": { "summary": "读取设备端媒体库", "description": "返回最多 100 个 URL 或网络电台收藏和 100 条播放历史。相同完整 URL 的成功播放会合并并累计 playCount；所有 source 均删除查询参数、用户信息和片段。", "responses": { "200": { "description": "脱敏后的媒体库", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } } } } } },
+	"/media-library/favorites": { "post": { "summary": "新增或更新媒体收藏", "description": "请求必须在完整 url、historyId 与 radioStationId 中三选一。radioStationId 由设备端读取电台完整流地址；相同完整 URL 会更新原收藏而不是创建重复项；完整地址写入权限 0600 的设备自有配置文件。", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MediaFavoriteInput" } } } }, "responses": { "201": { "$ref": "#/components/responses/JSONEnvelope" }, "400": { "description": "收藏来源或媒体 URL 无效" }, "404": { "description": "播放历史或网络电台不存在" }, "409": { "description": "Mock 能力未开放或达到 100 个收藏上限" } } } },
+	"/media-library/history": { "delete": { "summary": "清空播放历史", "description": "只删除历史，不影响 URL 收藏、当前播放或队列。", "responses": { "200": { "$ref": "#/components/responses/JSONEnvelope" }, "409": { "$ref": "#/components/responses/NotReady" } } } },
+	"/media-library/{collection}/{itemId}": { "parameters": [{ "name": "collection", "in": "path", "required": true, "schema": { "type": "string", "enum": ["favorites", "history"] } }, { "name": "itemId", "in": "path", "required": true, "schema": { "type": "string" } }], "delete": { "summary": "删除一条收藏或播放历史", "responses": { "200": { "$ref": "#/components/responses/JSONEnvelope" }, "404": { "description": "媒体库条目不存在" }, "409": { "$ref": "#/components/responses/NotReady" } } } },
+	"/media-library/{collection}/{itemId}/{action}": { "parameters": [{ "name": "collection", "in": "path", "required": true, "schema": { "type": "string", "enum": ["favorites", "history"] } }, { "name": "itemId", "in": "path", "required": true, "schema": { "type": "string" } }, { "name": "action", "in": "path", "required": true, "schema": { "type": "string", "enum": ["play", "queue"] } }], "post": { "summary": "播放媒体库条目或加入队列", "description": "浏览器只提交条目 ID；服务在音箱内读取完整 URL，因此不会把私密查询参数返回前端。play 成功后会更新播放历史。", "responses": { "200": { "description": "操作后回读的播放器状态", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } } }, "404": { "description": "媒体库条目不存在" }, "409": { "$ref": "#/components/responses/NotReady" } } } },
     "/scenes": { "get": { "summary": "读取持久化播放器场景", "description": "场景存储在音箱自有配置目录；source 会删除查询参数和用户信息。schedule 包含按音箱时区计算的下次执行时间和上次执行结果。", "responses": { "200": { "$ref": "#/components/responses/JSONEnvelope" } } }, "post": { "summary": "创建播放器场景", "description": "最多保存 20 个场景；完整 URL 只保存在音箱的 0600 配置文件中。同一时间且星期重叠的启用计划会被拒绝。", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PlayerSceneInput" } } } }, "responses": { "201": { "$ref": "#/components/responses/JSONEnvelope" }, "400": { "description": "场景字段或计划无效" }, "409": { "description": "Mock 能力未开放、达到数量上限或自动启动计划冲突" } } } },
     "/scenes/{sceneId}": { "parameters": [{ "name": "sceneId", "in": "path", "required": true, "schema": { "type": "string" } }], "put": { "summary": "修改播放器场景", "description": "url 为空时保留设备中已保存的完整地址，避免已隐藏的私密查询参数丢失；修改计划时同样执行重叠冲突校验。", "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PlayerSceneInput" } } } }, "responses": { "200": { "$ref": "#/components/responses/JSONEnvelope" }, "400": { "description": "场景字段或计划无效" }, "404": { "description": "场景不存在" }, "409": { "description": "Mock 能力未开放或自动启动计划冲突" } } }, "delete": { "summary": "删除播放器场景", "responses": { "200": { "$ref": "#/components/responses/JSONEnvelope" }, "404": { "description": "场景不存在" }, "409": { "$ref": "#/components/responses/NotReady" } } } },
     "/scenes/{sceneId}/apply": { "parameters": [{ "name": "sceneId", "in": "path", "required": true, "schema": { "type": "string" } }], "post": { "summary": "启动播放器场景", "description": "按顺序替换当前播放、设置并回读音量，再设置或取消定时停止；成功响应包含场景和最终播放器状态。", "responses": { "200": { "description": "场景已应用并回读", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Envelope" } } } }, "404": { "description": "场景不存在" }, "409": { "$ref": "#/components/responses/NotReady" } } } },
@@ -97,6 +102,42 @@
         },
         "additionalProperties": false
       },
+	  "MediaFavoriteInput": {
+		"type": "object",
+		"properties": {
+		  "title": { "type": "string", "maxLength": 100 },
+		  "url": { "type": "string", "format": "uri", "maxLength": 2048 },
+		  "historyId": { "type": "string" },
+		  "radioStationId": { "type": "string" }
+		},
+		"oneOf": [{ "required": ["url"] }, { "required": ["historyId"] }, { "required": ["radioStationId"] }],
+		"additionalProperties": false
+	  },
+	  "MediaLibraryItem": {
+		"type": "object",
+		"required": ["id", "title", "source", "kind"],
+		"properties": {
+		  "id": { "type": "string" },
+		  "title": { "type": "string" },
+		  "source": { "type": "string", "description": "已删除查询参数、用户信息和片段的公开地址。" },
+		  "kind": { "type": "string", "enum": ["url", "radio", "scene"] },
+		  "createdAt": { "type": "string", "format": "date-time" },
+		  "lastPlayedAt": { "type": "string", "format": "date-time" },
+		  "playCount": { "type": "integer", "minimum": 1 }
+		},
+		"additionalProperties": false
+	  },
+	  "MediaLibrary": {
+		"type": "object",
+		"required": ["favorites", "history", "favoriteLimit", "historyLimit"],
+		"properties": {
+		  "favorites": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/MediaLibraryItem" } },
+		  "history": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/MediaLibraryItem" } },
+		  "favoriteLimit": { "type": "integer", "const": 100 },
+		  "historyLimit": { "type": "integer", "const": 100 }
+		},
+		"additionalProperties": false
+	  },
       "PlayerSceneInput": {
         "type": "object",
         "required": ["name", "icon", "title", "url", "volume", "timerMinutes", "schedule"],

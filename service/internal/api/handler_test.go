@@ -119,7 +119,7 @@ func TestAllMockScenariosHaveDistinctAggregateState(t *testing.T) {
 
 func TestSensitiveFieldsNeverEnterResponses(t *testing.T) {
 	server := testServer(t)
-	paths := []string{"/capabilities", "/device", "/status", "/airplay", "/network", "/audio", "/bluetooth", "/lighting", "/schedules", "/player"}
+	paths := []string{"/capabilities", "/device", "/status", "/airplay", "/network", "/audio", "/bluetooth", "/lighting", "/schedules", "/player", "/media-library"}
 	for _, path := range paths {
 		body := getJSON(t, server, api.BasePath+path)
 		assertNoSensitiveKey(t, body, path)
@@ -210,6 +210,8 @@ func TestUnverifiedWritesReturnCapabilityNotReady(t *testing.T) {
 		{http.MethodPatch, "/lighting"},
 		{http.MethodPut, "/microphone/schedule"},
 		{http.MethodPost, "/player/control"},
+		{http.MethodPost, "/media-library/favorites"},
+		{http.MethodDelete, "/media-library/history"},
 	}
 	for _, item := range requests {
 		req, _ := http.NewRequestWithContext(context.Background(), item.method, server.URL+api.BasePath+item.path, nil)
@@ -291,7 +293,7 @@ func TestOpenAPIContractListsImplementedRoutes(t *testing.T) {
 		"/capabilities", "/device", "/status", "/airplay", "/network", "/audio",
 		"/bluetooth", "/lighting", "/schedules", "/events", "/airplay/recover",
 		"/airplay/auto-recover", "/network/switch", "/microphone/schedule", "/mock/scenarios",
-		"/audio/effect", "/player", "/player/control", "/system", "/system/update",
+		"/audio/effect", "/player", "/player/control", "/media-library", "/media-library/favorites", "/media-library/history", "/media-library/{collection}/{itemId}", "/media-library/{collection}/{itemId}/{action}", "/system", "/system/update",
 	}
 	for _, path := range expected {
 		if _, ok := paths[path]; !ok {
@@ -792,6 +794,51 @@ func TestRealModeControlsKPlayerThroughValidatedPlayerAPI(t *testing.T) {
 	current := player["current"].(map[string]any)
 	if strings.Contains(current["source"].(string), "token") {
 		t.Fatalf("media query leaked into API response: %#v", current)
+	}
+	libraryBody := getJSON(t, server, api.BasePath+"/media-library")
+	library := libraryBody["data"].(map[string]any)
+	history := library["history"].([]any)
+	if len(history) != 1 || history[0].(map[string]any)["playCount"] != float64(1) || strings.Contains(history[0].(map[string]any)["source"].(string), "token") {
+		t.Fatalf("play history was not recorded safely: %#v", library)
+	}
+	historyID := history[0].(map[string]any)["id"].(string)
+	mediaRequest := func(method, path, payload string, expected int) map[string]any {
+		t.Helper()
+		request, _ := http.NewRequest(method, server.URL+api.BasePath+path, strings.NewReader(payload))
+		request.Header.Set("Content-Type", "application/json")
+		response, err := server.Client().Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != expected {
+			body, _ := io.ReadAll(response.Body)
+			t.Fatalf("%s %s returned %d: %s", method, path, response.StatusCode, body)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	radioFavorited := mediaRequest(http.MethodPost, "/media-library/favorites", fmt.Sprintf(`{"radioStationId":%q}`, secondStationID), http.StatusCreated)
+	radioFavorites := radioFavorited["data"].(map[string]any)["favorites"].([]any)
+	if len(radioFavorites) != 1 || radioFavorites[0].(map[string]any)["kind"] != "radio" {
+		t.Fatalf("network radio was not favorited: %#v", radioFavorited)
+	}
+	favorited := mediaRequest(http.MethodPost, "/media-library/favorites", fmt.Sprintf(`{"historyId":%q}`, historyID), http.StatusCreated)
+	favorites := favorited["data"].(map[string]any)["favorites"].([]any)
+	if len(favorites) != 2 {
+		t.Fatalf("history item was not favorited: %#v", favorited)
+	}
+	favoriteID := favorites[0].(map[string]any)["id"].(string)
+	queued := mediaRequest(http.MethodPost, "/media-library/favorites/"+favoriteID+"/queue", "", http.StatusOK)
+	if len(queued["data"].(map[string]any)["queue"].([]any)) != 2 {
+		t.Fatalf("favorite was not added to the queue: %#v", queued)
+	}
+	deletedHistory := mediaRequest(http.MethodDelete, "/media-library/history/"+historyID, "", http.StatusOK)
+	if len(deletedHistory["data"].(map[string]any)["history"].([]any)) != 0 {
+		t.Fatalf("history item was not deleted: %#v", deletedHistory)
 	}
 	player = control(`{"action":"volume_set","volume":25}`)
 	if player["volume"].(map[string]any)["value"] != float64(25) {

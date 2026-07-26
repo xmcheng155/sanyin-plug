@@ -26,7 +26,10 @@ import (
 const (
 	radioStationsPath = "/mnt/UDISK/sanyin-config/radio-stations.json"
 	playerScenesPath  = "/mnt/UDISK/sanyin-config/player-scenes.json"
+	mediaLibraryPath  = "/mnt/UDISK/sanyin-config/media-library.json"
 	maxPlayerScenes   = 20
+	maxMediaFavorites = 100
+	maxMediaHistory   = 100
 	sceneSchedulePoll = 15 * time.Second
 )
 
@@ -351,6 +354,28 @@ type radioEntry struct {
 	URL  string `json:"url"`
 }
 
+type mediaHistoryEntry struct {
+	ID           string    `json:"id"`
+	Title        string    `json:"title"`
+	URL          string    `json:"url"`
+	Kind         string    `json:"kind"`
+	LastPlayedAt time.Time `json:"lastPlayedAt"`
+	PlayCount    int       `json:"playCount"`
+}
+
+type mediaFavoriteEntry struct {
+	ID        string    `json:"id"`
+	Title     string    `json:"title"`
+	URL       string    `json:"url"`
+	Kind      string    `json:"kind"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+type mediaLibraryStore struct {
+	Favorites []mediaFavoriteEntry `json:"favorites"`
+	History   []mediaHistoryEntry  `json:"history"`
+}
+
 type sceneEntry struct {
 	ID           string             `json:"id"`
 	Name         string             `json:"name"`
@@ -379,6 +404,7 @@ type playbackManager struct {
 
 	operationMu         sync.Mutex
 	sceneMu             sync.Mutex
+	libraryMu           sync.Mutex
 	mu                  sync.Mutex
 	queue               []playerEntry
 	currentIndex        int
@@ -386,6 +412,10 @@ type playbackManager struct {
 	stationsLoaded      bool
 	scenes              []sceneEntry
 	scenesLoaded        bool
+	mediaFavorites      []mediaFavoriteEntry
+	mediaHistory        []mediaHistoryEntry
+	mediaLibraryLoaded  bool
+	librarySequence     uint64
 	last                playerTransport
 	radioTransport      string
 	revision            uint64
@@ -453,6 +483,358 @@ func (m *playbackManager) saveStations(ctx context.Context) error {
 		return nil
 	}
 	return err
+}
+
+func validMediaKind(kind string) bool {
+	return kind == "url" || kind == "radio" || kind == "scene"
+}
+
+func (m *playbackManager) ensureMediaLibraryLoaded(ctx context.Context) {
+	m.libraryMu.Lock()
+	defer m.libraryMu.Unlock()
+	if m.mediaLibraryLoaded {
+		return
+	}
+	m.mediaLibraryLoaded = true
+	reader, ok := m.runner.(interface {
+		ReadDeviceFile(context.Context, string) ([]byte, error)
+	})
+	if !ok {
+		return
+	}
+	content, err := reader.ReadDeviceFile(ctx, mediaLibraryPath)
+	if err != nil {
+		return
+	}
+	var stored mediaLibraryStore
+	if json.Unmarshal(content, &stored) != nil || len(stored.Favorites) > maxMediaFavorites || len(stored.History) > maxMediaHistory {
+		return
+	}
+	favoriteIDs := map[string]bool{}
+	for _, entry := range stored.Favorites {
+		if entry.ID == "" || favoriteIDs[entry.ID] || entry.CreatedAt.IsZero() || !validMediaKind(entry.Kind) {
+			continue
+		}
+		mediaURL, validationErr := validateMediaURL(entry.URL)
+		title, titleErr := mediaTitle(entry.Title, mediaURL)
+		if validationErr != nil || titleErr != nil {
+			continue
+		}
+		entry.URL = mediaURL
+		entry.Title = title
+		favoriteIDs[entry.ID] = true
+		m.mediaFavorites = append(m.mediaFavorites, entry)
+	}
+	historyIDs := map[string]bool{}
+	for _, entry := range stored.History {
+		if entry.ID == "" || historyIDs[entry.ID] || entry.LastPlayedAt.IsZero() || entry.PlayCount < 1 || !validMediaKind(entry.Kind) {
+			continue
+		}
+		mediaURL, validationErr := validateMediaURL(entry.URL)
+		title, titleErr := mediaTitle(entry.Title, mediaURL)
+		if validationErr != nil || titleErr != nil {
+			continue
+		}
+		entry.URL = mediaURL
+		entry.Title = title
+		historyIDs[entry.ID] = true
+		m.mediaHistory = append(m.mediaHistory, entry)
+	}
+}
+
+func (m *playbackManager) saveMediaLibraryLocked(ctx context.Context) error {
+	store, ok := m.runner.(deviceFileStore)
+	if !ok {
+		return nil
+	}
+	content, err := json.Marshal(mediaLibraryStore{Favorites: m.mediaFavorites, History: m.mediaHistory})
+	if err != nil {
+		return err
+	}
+	err = store.WriteDeviceFile(ctx, mediaLibraryPath, append(content, '\n'), 0600)
+	if errors.Is(err, ErrCapabilityNotReady) {
+		return nil
+	}
+	return err
+}
+
+func cloneMediaFavorites(entries []mediaFavoriteEntry) []mediaFavoriteEntry {
+	return append([]mediaFavoriteEntry(nil), entries...)
+}
+
+func cloneMediaHistory(entries []mediaHistoryEntry) []mediaHistoryEntry {
+	return append([]mediaHistoryEntry(nil), entries...)
+}
+
+func (m *playbackManager) nextLibraryIDLocked(prefix string) string {
+	for {
+		m.librarySequence++
+		id := fmt.Sprintf("%s-%d-%d", prefix, m.now().UnixMilli(), m.librarySequence)
+		used := false
+		for _, entry := range m.mediaFavorites {
+			used = used || entry.ID == id
+		}
+		for _, entry := range m.mediaHistory {
+			used = used || entry.ID == id
+		}
+		if !used {
+			return id
+		}
+	}
+}
+
+func (m *playbackManager) mediaLibrarySnapshotLocked() domain.MediaLibrary {
+	favorites := make([]domain.MediaLibraryItem, len(m.mediaFavorites))
+	for index, entry := range m.mediaFavorites {
+		createdAt := entry.CreatedAt
+		favorites[index] = domain.MediaLibraryItem{ID: entry.ID, Title: entry.Title, Source: publicSource(entry.URL), Kind: entry.Kind, CreatedAt: &createdAt}
+	}
+	history := make([]domain.MediaLibraryItem, len(m.mediaHistory))
+	for index, entry := range m.mediaHistory {
+		lastPlayedAt := entry.LastPlayedAt
+		history[index] = domain.MediaLibraryItem{ID: entry.ID, Title: entry.Title, Source: publicSource(entry.URL), Kind: entry.Kind, LastPlayedAt: &lastPlayedAt, PlayCount: entry.PlayCount}
+	}
+	return domain.MediaLibrary{Favorites: favorites, History: history, FavoriteLimit: maxMediaFavorites, HistoryLimit: maxMediaHistory}
+}
+
+func (m *playbackManager) mediaLibrary(ctx context.Context) (domain.MediaLibrary, error) {
+	m.ensureMediaLibraryLoaded(ctx)
+	m.libraryMu.Lock()
+	defer m.libraryMu.Unlock()
+	return m.mediaLibrarySnapshotLocked(), nil
+}
+
+func (m *playbackManager) recordPlayback(ctx context.Context, entry playerEntry) {
+	if _, err := validateMediaURL(entry.URL); err != nil || !validMediaKind(entry.Kind) {
+		return
+	}
+	m.ensureMediaLibraryLoaded(ctx)
+	m.libraryMu.Lock()
+	defer m.libraryMu.Unlock()
+	previous := cloneMediaHistory(m.mediaHistory)
+	now := m.now().Truncate(time.Second)
+	current := mediaHistoryEntry{ID: m.nextLibraryIDLocked("history"), Title: entry.Title, URL: entry.URL, Kind: entry.Kind, LastPlayedAt: now, PlayCount: 1}
+	for index, item := range m.mediaHistory {
+		if item.URL != entry.URL {
+			continue
+		}
+		current.ID = item.ID
+		current.PlayCount = item.PlayCount + 1
+		m.mediaHistory = append(m.mediaHistory[:index], m.mediaHistory[index+1:]...)
+		break
+	}
+	m.mediaHistory = append([]mediaHistoryEntry{current}, m.mediaHistory...)
+	if len(m.mediaHistory) > maxMediaHistory {
+		m.mediaHistory = m.mediaHistory[:maxMediaHistory]
+	}
+	if err := m.saveMediaLibraryLocked(ctx); err != nil {
+		m.mediaHistory = previous
+	}
+}
+
+func (m *playbackManager) createMediaFavorite(ctx context.Context, input domain.MediaFavoriteInput) (domain.MediaLibrary, error) {
+	hasURL := strings.TrimSpace(input.URL) != ""
+	hasHistory := strings.TrimSpace(input.HistoryID) != ""
+	hasStation := strings.TrimSpace(input.RadioStationID) != ""
+	if boolCount(hasURL, hasHistory, hasStation) != 1 {
+		return domain.MediaLibrary{}, ErrInvalidInput
+	}
+	var station radioEntry
+	if hasStation {
+		m.ensureStationsLoaded(ctx)
+		m.mu.Lock()
+		for _, entry := range m.stations {
+			if entry.ID == input.RadioStationID {
+				station = entry
+				break
+			}
+		}
+		m.mu.Unlock()
+		if station.ID == "" {
+			return domain.MediaLibrary{}, ErrNotFound
+		}
+	}
+	m.ensureMediaLibraryLoaded(ctx)
+	m.libraryMu.Lock()
+	defer m.libraryMu.Unlock()
+	var mediaURL, title, kind string
+	var err error
+	if hasHistory {
+		for _, entry := range m.mediaHistory {
+			if entry.ID == input.HistoryID {
+				mediaURL, title, kind = entry.URL, entry.Title, entry.Kind
+				break
+			}
+		}
+		if mediaURL == "" {
+			return domain.MediaLibrary{}, ErrNotFound
+		}
+		if strings.TrimSpace(input.Title) != "" {
+			title, err = mediaTitle(input.Title, mediaURL)
+			if err != nil {
+				return domain.MediaLibrary{}, err
+			}
+		}
+	} else if hasStation {
+		mediaURL, title, kind = station.URL, station.Name, "radio"
+		if strings.TrimSpace(input.Title) != "" {
+			title, err = mediaTitle(input.Title, mediaURL)
+			if err != nil {
+				return domain.MediaLibrary{}, err
+			}
+		}
+	} else {
+		mediaURL, err = validateMediaURL(input.URL)
+		if err != nil {
+			return domain.MediaLibrary{}, err
+		}
+		title, err = mediaTitle(input.Title, mediaURL)
+		if err != nil {
+			return domain.MediaLibrary{}, err
+		}
+		kind = "url"
+	}
+	previous := cloneMediaFavorites(m.mediaFavorites)
+	entry := mediaFavoriteEntry{ID: m.nextLibraryIDLocked("favorite"), Title: title, URL: mediaURL, Kind: kind, CreatedAt: m.now().Truncate(time.Second)}
+	for index, item := range m.mediaFavorites {
+		if item.URL != mediaURL {
+			continue
+		}
+		entry.ID = item.ID
+		entry.CreatedAt = item.CreatedAt
+		m.mediaFavorites = append(m.mediaFavorites[:index], m.mediaFavorites[index+1:]...)
+		break
+	}
+	if len(m.mediaFavorites) >= maxMediaFavorites && len(m.mediaFavorites) == len(previous) {
+		m.mediaFavorites = previous
+		return domain.MediaLibrary{}, ErrConflict
+	}
+	m.mediaFavorites = append([]mediaFavoriteEntry{entry}, m.mediaFavorites...)
+	if err := m.saveMediaLibraryLocked(ctx); err != nil {
+		m.mediaFavorites = previous
+		return domain.MediaLibrary{}, err
+	}
+	return m.mediaLibrarySnapshotLocked(), nil
+}
+
+func boolCount(values ...bool) int {
+	count := 0
+	for _, value := range values {
+		if value {
+			count++
+		}
+	}
+	return count
+}
+
+func (m *playbackManager) deleteMediaFavorite(ctx context.Context, id string) (domain.MediaLibrary, error) {
+	m.ensureMediaLibraryLoaded(ctx)
+	m.libraryMu.Lock()
+	defer m.libraryMu.Unlock()
+	index := -1
+	for candidate := range m.mediaFavorites {
+		if m.mediaFavorites[candidate].ID == id {
+			index = candidate
+			break
+		}
+	}
+	if index < 0 {
+		return domain.MediaLibrary{}, ErrNotFound
+	}
+	previous := cloneMediaFavorites(m.mediaFavorites)
+	m.mediaFavorites = append(m.mediaFavorites[:index], m.mediaFavorites[index+1:]...)
+	if err := m.saveMediaLibraryLocked(ctx); err != nil {
+		m.mediaFavorites = previous
+		return domain.MediaLibrary{}, err
+	}
+	return m.mediaLibrarySnapshotLocked(), nil
+}
+
+func (m *playbackManager) deleteMediaHistory(ctx context.Context, id string) (domain.MediaLibrary, error) {
+	m.ensureMediaLibraryLoaded(ctx)
+	m.libraryMu.Lock()
+	defer m.libraryMu.Unlock()
+	index := -1
+	for candidate := range m.mediaHistory {
+		if m.mediaHistory[candidate].ID == id {
+			index = candidate
+			break
+		}
+	}
+	if index < 0 {
+		return domain.MediaLibrary{}, ErrNotFound
+	}
+	previous := cloneMediaHistory(m.mediaHistory)
+	m.mediaHistory = append(m.mediaHistory[:index], m.mediaHistory[index+1:]...)
+	if err := m.saveMediaLibraryLocked(ctx); err != nil {
+		m.mediaHistory = previous
+		return domain.MediaLibrary{}, err
+	}
+	return m.mediaLibrarySnapshotLocked(), nil
+}
+
+func (m *playbackManager) clearMediaHistory(ctx context.Context) (domain.MediaLibrary, error) {
+	m.ensureMediaLibraryLoaded(ctx)
+	m.libraryMu.Lock()
+	defer m.libraryMu.Unlock()
+	previous := cloneMediaHistory(m.mediaHistory)
+	m.mediaHistory = nil
+	if err := m.saveMediaLibraryLocked(ctx); err != nil {
+		m.mediaHistory = previous
+		return domain.MediaLibrary{}, err
+	}
+	return m.mediaLibrarySnapshotLocked(), nil
+}
+
+func (m *playbackManager) storedMediaEntry(collection, id string) (playerEntry, error) {
+	m.libraryMu.Lock()
+	defer m.libraryMu.Unlock()
+	if collection == "favorites" {
+		for _, item := range m.mediaFavorites {
+			if item.ID == id {
+				return playerEntry{Title: item.Title, URL: item.URL, Kind: item.Kind}, nil
+			}
+		}
+	} else if collection == "history" {
+		for _, item := range m.mediaHistory {
+			if item.ID == id {
+				return playerEntry{Title: item.Title, URL: item.URL, Kind: item.Kind}, nil
+			}
+		}
+	} else {
+		return playerEntry{}, ErrInvalidInput
+	}
+	return playerEntry{}, ErrNotFound
+}
+
+func (m *playbackManager) controlMediaLibraryItem(ctx context.Context, collection, id, action string) (domain.Player, error) {
+	if action != "play" && action != "queue" {
+		return domain.Player{}, ErrInvalidInput
+	}
+	m.ensureMediaLibraryLoaded(ctx)
+	stored, err := m.storedMediaEntry(collection, id)
+	if err != nil {
+		return domain.Player{}, err
+	}
+	m.ensureStationsLoaded(ctx)
+	m.operationMu.Lock()
+	defer m.operationMu.Unlock()
+	m.mu.Lock()
+	stored.ID = m.nextID("media")
+	if action == "play" {
+		m.queue = []playerEntry{stored}
+		m.currentIndex = 0
+	} else {
+		m.queue = append(m.queue, stored)
+	}
+	index := m.currentIndex
+	m.mu.Unlock()
+	if action == "play" {
+		if err := m.playIndex(ctx, index); err != nil {
+			return domain.Player{}, err
+		}
+	}
+	return m.statusLocked(ctx)
 }
 
 func normalizeSceneSchedule(input domain.PlayerSceneScheduleInput) (sceneScheduleEntry, error) {
@@ -1247,6 +1629,7 @@ func (m *playbackManager) playIndex(ctx context.Context, index int) error {
 	if err := m.waitForTimeout(ctx, "playing", waitTimeout); err != nil {
 		return err
 	}
+	m.recordPlayback(ctx, entry)
 	if entry.Kind == "radio" {
 		m.mu.Lock()
 		m.radioTransport = "playing"

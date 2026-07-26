@@ -455,6 +455,97 @@ func TestPlaybackManagerPersistsAndRedactsPlayerScenes(t *testing.T) {
 	}
 }
 
+func TestPlaybackManagerPersistsMediaHistoryFavoritesAndPrivateURLs(t *testing.T) {
+	runner := &recordingRunner{}
+	controller := &fakePlayerController{state: playerTransport{State: "stopped"}}
+	now := time.Date(2026, 7, 26, 8, 0, 0, 0, time.FixedZone("CST", 8*60*60))
+	manager := newPlaybackManager(controller, runner, func() time.Time { return now })
+	manager.pollEvery = time.Hour
+	ctx := context.Background()
+	privateURL := "https://media.example/morning.mp3?token=private"
+
+	for _, title := range []string{"清晨音乐", "清晨音乐新版"} {
+		if _, err := manager.control(ctx, domain.PlayerCommand{Action: "play_url", Title: title, URL: privateURL}); err != nil {
+			t.Fatal(err)
+		}
+		now = now.Add(time.Minute)
+	}
+	library, err := manager.mediaLibrary(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(library.History) != 1 || library.History[0].PlayCount != 2 || library.History[0].Title != "清晨音乐新版" {
+		t.Fatalf("repeated playback was not coalesced: %#v", library.History)
+	}
+	if strings.Contains(library.History[0].Source, "token") {
+		t.Fatalf("history response leaked a private query: %#v", library.History[0])
+	}
+
+	library, err = manager.createMediaFavorite(ctx, domain.MediaFavoriteInput{HistoryID: library.History[0].ID})
+	if err != nil || len(library.Favorites) != 1 || strings.Contains(library.Favorites[0].Source, "token") {
+		t.Fatalf("history item was not favorited safely: %#v %v", library, err)
+	}
+	library, err = manager.createMediaFavorite(ctx, domain.MediaFavoriteInput{Title: "每天清晨", URL: privateURL})
+	if err != nil || len(library.Favorites) != 1 || library.Favorites[0].Title != "每天清晨" {
+		t.Fatalf("duplicate favorite was not updated in place: %#v %v", library, err)
+	}
+	if !strings.Contains(string(runner.files[mediaLibraryPath]), "token=private") {
+		t.Fatalf("complete private URL was not persisted on-device: %s", runner.files[mediaLibraryPath])
+	}
+
+	reloadedController := &fakePlayerController{state: playerTransport{State: "stopped"}}
+	reloaded := newPlaybackManager(reloadedController, runner, func() time.Time { return now })
+	reloaded.pollEvery = time.Hour
+	reloadedLibrary, err := reloaded.mediaLibrary(ctx)
+	if err != nil || len(reloadedLibrary.Favorites) != 1 || len(reloadedLibrary.History) != 1 {
+		t.Fatalf("media library did not survive a service restart: %#v %v", reloadedLibrary, err)
+	}
+	player, err := reloaded.controlMediaLibraryItem(ctx, "favorites", reloadedLibrary.Favorites[0].ID, "play")
+	if err != nil || player.Current == nil || player.Current.Title != "每天清晨" {
+		t.Fatalf("stored favorite did not play: %#v %v", player, err)
+	}
+	played := reloadedController.playedURLs()
+	if len(played) != 1 || played[0] != privateURL {
+		t.Fatalf("player did not receive the complete stored URL: %#v", played)
+	}
+
+	library, err = reloaded.deleteMediaFavorite(ctx, reloadedLibrary.Favorites[0].ID)
+	if err != nil || len(library.Favorites) != 0 {
+		t.Fatalf("favorite was not deleted: %#v %v", library, err)
+	}
+	library, err = reloaded.clearMediaHistory(ctx)
+	if err != nil || len(library.History) != 0 {
+		t.Fatalf("history was not cleared: %#v %v", library, err)
+	}
+}
+
+func TestPlaybackManagerFavoritesSavedRadioStation(t *testing.T) {
+	runner := &recordingRunner{}
+	manager := newPlaybackManager(&fakePlayerController{state: playerTransport{State: "stopped"}}, runner, func() time.Time {
+		return time.Date(2026, 7, 26, 9, 0, 0, 0, time.FixedZone("CST", 8*60*60))
+	})
+	manager.pollEvery = time.Hour
+	ctx := context.Background()
+	player, err := manager.control(ctx, domain.PlayerCommand{Action: "radio_add", Title: "私密电台", URL: "https://radio.example/live.mp3?token=private"})
+	if err != nil || len(player.Stations) != 1 {
+		t.Fatalf("radio station was not added: %#v %v", player, err)
+	}
+	library, err := manager.createMediaFavorite(ctx, domain.MediaFavoriteInput{RadioStationID: player.Stations[0].ID})
+	if err != nil || len(library.Favorites) != 1 || library.Favorites[0].Kind != "radio" || library.Favorites[0].Title != "私密电台" {
+		t.Fatalf("radio station was not favorited: %#v %v", library, err)
+	}
+	if strings.Contains(library.Favorites[0].Source, "token") || !strings.Contains(string(runner.files[mediaLibraryPath]), "token=private") {
+		t.Fatalf("radio favorite did not preserve privacy boundary: %#v %s", library.Favorites[0], runner.files[mediaLibraryPath])
+	}
+	library, err = manager.createMediaFavorite(ctx, domain.MediaFavoriteInput{RadioStationID: player.Stations[0].ID})
+	if err != nil || len(library.Favorites) != 1 {
+		t.Fatalf("duplicate radio favorite was not updated in place: %#v %v", library, err)
+	}
+	if _, err := manager.createMediaFavorite(ctx, domain.MediaFavoriteInput{URL: "https://media.example/a.mp3", RadioStationID: player.Stations[0].ID}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("multiple favorite sources were accepted: %v", err)
+	}
+}
+
 func TestPlaybackManagerRejectsOverlappingSceneSchedules(t *testing.T) {
 	runner := &recordingRunner{}
 	manager := newPlaybackManager(&fakePlayerController{state: playerTransport{State: "stopped"}}, runner, func() time.Time {

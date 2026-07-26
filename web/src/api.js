@@ -21,9 +21,17 @@ export class ApiClient {
       ...options,
 	  headers: { Accept: "application/json", ...(method === "GET" ? {} : { "X-Sanyin-CSRF": "1" }), ...(options.headers || {}) },
     });
-    const payload = await response.json();
+	const responseText = await response.text();
+	let payload = null;
+	if (responseText) {
+		try {
+			payload = JSON.parse(responseText);
+		} catch {
+			if (response.ok) throw new Error("服务返回了无法识别的数据，请刷新页面后重试");
+		}
+	}
     if (!response.ok) {
-      const error = new Error(payload?.error?.message || `HTTP ${response.status}`);
+	  const error = new Error(payload?.error?.message || responseText.trim() || `请求失败（HTTP ${response.status}）`);
       error.code = payload?.error?.code || "request_failed";
       error.status = response.status;
       throw error;
@@ -42,6 +50,7 @@ export class ApiClient {
   lighting() { return this.request("/lighting"); }
 	schedules() { return this.request("/schedules"); }
 	player() { return this.request("/player"); }
+	mediaLibrary() { return this.request("/media-library"); }
 	scenes() { return this.request("/scenes"); }
 	system() { return this.request("/system"); }
 
@@ -59,6 +68,30 @@ export class ApiClient {
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ action, ...payload }),
 		});
+	}
+
+	createMediaFavorite(payload) {
+		return this.request("/media-library/favorites", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(payload),
+		});
+	}
+
+	deleteMediaFavorite(id) {
+		return this.request(`/media-library/favorites/${encodeURIComponent(id)}`, { method: "DELETE" });
+	}
+
+	deleteMediaHistory(id) {
+		return this.request(`/media-library/history/${encodeURIComponent(id)}`, { method: "DELETE" });
+	}
+
+	clearMediaHistory() {
+		return this.request("/media-library/history", { method: "DELETE" });
+	}
+
+	controlMediaLibraryItem(collection, id, action) {
+		return this.request(`/media-library/${encodeURIComponent(collection)}/${encodeURIComponent(id)}/${encodeURIComponent(action)}`, { method: "POST" });
 	}
 
 	createScene(payload) {

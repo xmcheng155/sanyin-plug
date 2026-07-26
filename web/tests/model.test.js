@@ -280,6 +280,16 @@ test("网页提供本地 URL 播放、完整控制、队列和网络电台", asy
 	assert.match(appSource, /id="radio-station-form"/);
 	assert.match(appSource, /data-player-action="radio_move_up"/);
 	assert.match(appSource, /data-player-action="radio_move_down"/);
+	assert.match(appSource, /class="station-more"/);
+	assert.match(appSource, /class="icon-button station-more-trigger"/);
+	assert.match(appSource, /aria-label="\$\{escapeHTML\(moreLabel\)\}"/);
+	assert.match(appSource, /iconMarkup\("more"\)/);
+	assert.match(appSource, /data-player-action="radio_favorite"/);
+	assert.match(appSource, /radioStationId: itemId/);
+	assert.match(appSource, /☆ 收藏到媒体库/);
+	assert.match(appSource, /我的收藏/);
+	assert.match(appSource, /\.station-more\[open\]/);
+	assert.match(appSource, /details !== activeStationMenu/);
 	assert.match(appSource, /id="stop-timer-form"/);
 	assert.match(appSource, /data-player-action="timer_cancel"/);
 	assert.match(appSource, /最长 60 分钟/);
@@ -300,6 +310,15 @@ test("网页提供本地 URL 播放、完整控制、队列和网络电台", asy
 	assert.match(css, /\.player-progress/);
 	assert.match(css, /\.queue-list/);
 	assert.match(css, /\.station-grid/);
+	assert.match(css, /\.station-more-menu/);
+	assert.match(css, /\.station-more-trigger \{ width: 36px; min-width: 36px; height: 36px/);
+	assert.match(css, /grid-template-columns: 38px minmax\(0, 1fr\) auto/);
+});
+
+test("API 会保留服务端纯文本错误，收藏失败时可直接理解", async () => {
+	const apiSource = await readFile(new URL("../src/api.js", import.meta.url), "utf8");
+	assert.match(apiSource, /const responseText = await response\.text\(\)/);
+	assert.match(apiSource, /payload\?\.error\?\.message \|\| responseText\.trim\(\)/);
 });
 
 test("播放表单按控件基线对齐并优先展示媒体 URL", async () => {
@@ -324,6 +343,25 @@ test("播放易用性提供定时快捷值、URL 工具和操作影响说明", a
 	assert.match(appSource, /添加到队列末尾/);
 	assert.match(appSource, /validateMediaURLInput/);
 	assert.match(appSource, /window\.isSecureContext/);
+});
+
+test("媒体库提供播放历史、URL 收藏、搜索和私密地址保护", async () => {
+	const appSource = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
+	const apiSource = await readFile(new URL("../src/api.js", import.meta.url), "utf8");
+	const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
+	assert.match(appSource, /sectionHeading\("媒体库"/);
+	assert.match(appSource, /id="media-library-search"/);
+	assert.match(appSource, /data-submit-action="favorite_url"/);
+	assert.match(appSource, /data-library-action="play"/);
+	assert.match(appSource, /data-library-action="queue"/);
+	assert.match(appSource, /data-library-action="favorite"/);
+	assert.match(appSource, /私密参数只保存在音箱本机/);
+	assert.match(appSource, /clear_history/);
+	assert.match(apiSource, /mediaLibrary\(\)/);
+	assert.match(apiSource, /createMediaFavorite\(payload\)/);
+	assert.match(apiSource, /controlMediaLibraryItem\(collection, id, action\)/);
+	assert.match(css, /\.media-library-grid \{[^}]*repeat\(2/s);
+	assert.match(css, /@media \(max-width: 900px\)[\s\S]*\.media-library-grid \{ grid-template-columns: 1fr/);
 });
 
 test("普通、警告和危险按钮使用不同颜色并提供轻量兼容性说明", async () => {

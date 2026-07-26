@@ -62,6 +62,7 @@
 | `GET /audio` | 系统音量、输出静音、麦克风和 EQ 分层状态 |
 | `GET /bluetooth` | 服务状态、可靠性不足时保持 `unknown` 的当前开关，以及最近一次设备事件确认结果 |
 | `GET /player` | KPlayer 传输状态、播放进度、当前媒体、内存队列和自有网络电台列表 |
+| `GET /media-library` | 最多 100 个 URL/网络电台收藏和 100 条播放历史；只返回脱敏公开地址 |
 | `GET /lighting` | 灯光诊断快照 |
 | `GET /schedules` | 麦克风计划、闹钟和提醒的诊断快照 |
 | `GET /system` | 应用版本、提交、构建时间、网页更新是否启用及最近更新/回滚状态 |
@@ -106,6 +107,7 @@ EQ 的 `selectedMode`、`appliedMode`、`applyState` 必须分别保留。`pendi
 - `PATCH /audio/effect`：请求体为 `{"mode": 0..6}`，只调用音箱 loopback 的固定 EQ 路由，等待 `commonStatus.eqType` 对应事件；`selectedMode` 和基于固件文件回读的 `appliedMode` 必须分开返回；
 - `POST /network/switch`：请求体为 `{"ssid":"...","password":"..."}`；开放网络使用空密码。事务先备份当前配置，45 秒内未同时验收目标 SSID、`COMPLETED`、IPv4、默认路由和网关可达时自动恢复原配置，并再次等待原网络联网。服务启动时也会恢复带有未完成标记的事务。
 - `POST /player/control`：统一接收 `action`。`play_url` 直接播放 URL；`pause`、`resume`、`stop`、`next` 控制传输；`volume_set` 携带整数 `volume=0..100`，只在 KPlayer 播放中通过 RenderingControl 设置并以 `GetVolume` 回读验收，暂停或停止时拒绝；`queue_add`、`queue_play`、`queue_remove`、`queue_clear` 管理队列；`radio_add`、`radio_remove`、`radio_play`、`radio_queue` 管理网络电台，`radio_move_up`、`radio_move_down` 携带 `itemId` 调整收藏顺序；`timer_set` 携带整数 `durationMinutes=1..60`，`timer_cancel` 取消。媒体只接受 HTTP/HTTPS，播放状态、当前 URI 和进度必须由原厂 KPlayer UPnP AVTransport 回读；普通曲目自然结束后由设备端后台监视器自动续播下一项。
+- 媒体库接口：`POST /media-library/favorites` 使用完整 `url`、已有 `historyId` 或已有网络电台 `radioStationId` 三者之一新增收藏；电台完整流地址由设备端关联读取，重复完整 URL 更新原条目。`DELETE /media-library/{favorites|history}/{itemId}` 删除单条，`DELETE /media-library/history` 清空历史；`POST /media-library/{favorites|history}/{itemId}/{play|queue}` 通过设备端条目 ID 播放或入队。媒体确认进入 `playing` 后才记录历史，同一完整 URL 会前移、更新标题与类型并累计 `playCount`。
 - `POST /system/update`：请求体媒体类型固定为 `application/vnd.sanyin.update+zip`，最大 32 MiB。更新包必须只包含 `manifest.json`、`sanyin-config` 和 `signature.ed25519`。服务验证 Ed25519 签名、二进制 SHA-256、严格递增的 `X.Y.Z` 版本和 Linux/ARMv7 小端 ELF；设备侧再验证程序内置版本，原子替换后检查进程及 TCP 8787，20 秒内失败自动恢复上一版。Mock 模式、无公钥模式、同版本和降级包均拒绝。
 
 网页更新状态使用 `idle`、`staged`、`applying`、`succeeded`、`failed`、`rolled_back`、`rollback_failed`。状态文件位于 `/mnt/UDISK/sanyin-config/update/update-status`。该接口只更新 `sanyin-config` 单文件及其内嵌网页，不能更新 init 或其他辅助脚本；跨组件升级必须通过 SSH/ADB 完整安装。
@@ -113,6 +115,8 @@ EQ 的 `selectedMode`、`appliedMode`、`applyState` 必须分别保留。`pendi
 蓝牙、EQ、Wi-Fi 和本地播放标记为 `experimental`：表示正常路径已有设备验收，Wi-Fi 也完成了超时回退和启动恢复验收；本地播放已验证 URL 播放、暂停、恢复、停止、0..100 音量写入回读、进度、手动/自动切歌、队列及电台的正常路径。新网络覆盖面、断电窗口、异常媒体格式、播放网络中断，以及本地播放与 AirPlay/蓝牙抢占等场景仍未全部达到 S4，不得显示为 `safe`。仅应添加可信 URL；服务不会替用户代理、缓存或扫描远端内容。
 
 网络电台及排列顺序保存到 `/mnt/UDISK/sanyin-config/radio-stations.json`，以 `0600` 权限原子写入并在服务重启后恢复；播放队列仅保存在内存中，服务重启后清空，但正在播放的媒体会通过 KPlayer `GetMediaInfo.CurrentURI` 回读，并优先匹配收藏电台名称。直播 MP3 首次缓冲最多等待 12 秒；原厂 KPlayer 对无限流会回报伪时长和伪停止状态，服务在已确认进入播放后将电台进度归一化为 `0/0`，并在用户主动暂停或停止前维持相应的直播传输状态。
+
+播放历史和 URL/网络电台收藏共同保存到 `/mnt/UDISK/sanyin-config/media-library.json`，以 `0600` 权限原子写入，每类最多 100 条。文件中保留完整 URL 供设备重新播放；所有 API 响应只返回删除查询参数、用户信息和片段后的 `source`。清空历史不影响收藏、播放队列或当前播放。
 
 定时停止由音箱端服务执行，不依赖浏览器保持打开。`GET /player` 的 `stopTimer` 返回 `active`、`stopAt` 和 `remainingSeconds`；手动 `stop` 或 `queue_clear` 会取消定时，换歌和切换电台不会取消。定时器只保存在内存中，服务重启后清除，避免过期任务在重启后误停。
 
