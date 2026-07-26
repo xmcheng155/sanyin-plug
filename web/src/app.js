@@ -19,6 +19,7 @@ const navItems = [
   { id: "audio", label: "音频", icon: "♫", title: "音频与 EQ" },
   { id: "bluetooth", label: "蓝牙", icon: "ᛒ", title: "蓝牙" },
   { id: "diagnostics", label: "诊断", icon: "◫", title: "灯光、计划与诊断" },
+	{ id: "system", label: "版本", icon: "↥", title: "版本与更新" },
 ];
 
 const eqModes = [
@@ -43,6 +44,7 @@ const app = {
 	environment: null,
 	playerRefreshing: false,
 	playerVolumeUpdating: false,
+	pendingUpdateFile: null,
 };
 
 const elements = {
@@ -120,6 +122,7 @@ function bindEvents() {
 	if (event.target.closest("#confirm-eq")) runEQConfiguration(Number(event.target.closest("#confirm-eq").dataset.mode));
 	if (event.target.closest("[data-action='configure-wifi']")) openWiFiConfiguration();
 	if (event.target.closest("#confirm-wifi")) runWiFiConfiguration();
+	if (event.target.closest("#confirm-system-update")) runSystemUpdate();
 	const playerButton = event.target.closest("[data-player-action]");
 	if (playerButton) runPlayerAction(playerButton.dataset.playerAction, playerButton.dataset.itemId || "");
     if (event.target.closest("[data-action='reload']")) location.reload();
@@ -137,6 +140,10 @@ function bindEvents() {
 		if (event.target.id === "stop-timer-form") {
 			event.preventDefault();
 			submitStopTimer(event.target);
+		}
+		if (event.target.id === "system-update-form") {
+			event.preventDefault();
+			openSystemUpdateConfirmation(event.target);
 		}
 	});
 
@@ -190,8 +197,8 @@ async function loadData() {
   elements.refresh.classList.add("spinning");
   renderPage();
   try {
-    const [capabilities, device, status, airplay, network, audio, bluetooth, lighting, schedules, player] = await Promise.all([
-      api.capabilities(), api.device(), api.status(), api.airplay(), api.network(), api.audio(), api.bluetooth(), api.lighting(), api.schedules(), api.player(),
+    const [capabilities, device, status, airplay, network, audio, bluetooth, lighting, schedules, player, system] = await Promise.all([
+      api.capabilities(), api.device(), api.status(), api.airplay(), api.network(), api.audio(), api.bluetooth(), api.lighting(), api.schedules(), api.player(), api.system(),
     ]);
     app.data = {
       environment: status.environment,
@@ -206,6 +213,7 @@ async function loadData() {
       lighting: lighting.data,
       schedules: schedules.data,
 		player: player.data,
+		system: system.data,
     };
   } catch (error) {
     app.error = error;
@@ -251,6 +259,7 @@ function renderPage() {
     bluetooth: renderBluetooth,
 		player: renderPlayer,
     diagnostics: renderDiagnostics,
+		system: renderSystem,
   };
   elements.content.innerHTML = (pages[app.route] || renderOverview)();
 }
@@ -584,6 +593,111 @@ function renderDiagnostics() {
       <div class="panel-header"><div><h2>事件与诊断</h2><p>只显示归一化事件、来源和更新时间，不包含原始设备日志。</p></div><span class="state-pill tone-ok">SSE</span></div>
       <div class="event-list">${events}</div>
     </section>`;
+}
+
+function updateStatePresentation(update) {
+	const states = {
+		idle: ["尚无更新记录", "neutral"],
+		staged: ["等待应用", "warning"],
+		applying: ["正在更新", "warning"],
+		succeeded: ["更新成功", "ok"],
+		rolled_back: ["已自动回滚", "warning"],
+		failed: ["更新失败", "danger"],
+		rollback_failed: ["回滚失败", "danger"],
+	};
+	const [label, tone] = states[update?.state] || [update?.state || "未知", "unknown"];
+	return `<span class="state-pill tone-${tone}">${escapeHTML(label)}</span>`;
+}
+
+function renderSystem() {
+	const system = app.data.system;
+	const build = system.build;
+	const update = system.update || { state: "idle" };
+	const enabled = app.data.environment === "device" && system.updateEnabled;
+	return `
+		<section class="panel">
+			<div class="panel-header"><div><h2>当前版本</h2><p>网页资源与后端服务打包在同一个 ARMv7 程序中，更新后会一起切换。</p></div><span class="state-pill tone-ok">运行中</span></div>
+			<div class="detail-grid">
+				<div class="detail-row"><dl><dt>应用版本</dt><dd>${escapeHTML(build.version)}</dd></dl></div>
+				<div class="detail-row"><dl><dt>提交</dt><dd>${escapeHTML(build.commit)}</dd></dl></div>
+				<div class="detail-row"><dl><dt>构建时间</dt><dd>${escapeHTML(build.builtAt)}</dd></dl></div>
+				<div class="detail-row"><dl><dt>最近更新状态</dt><dd>${escapeHTML(update.version || "—")}</dd></dl>${updateStatePresentation(update)}</div>
+			</div>
+			${update.message ? `<div class="capability-callout ${update.state === "succeeded" ? "callout-info" : ""}"><strong>更新记录</strong><span>${escapeHTML(update.message)}${update.updatedAt ? ` · ${escapeHTML(update.updatedAt)}` : ""}</span></div>` : ""}
+		</section>
+		${sectionHeading("签名更新", "只接受由本项目更新私钥签名、目标为 Linux/ARMv7 且版本更高的 .sanyin-update 文件")}
+		<section class="panel">
+			<form id="system-update-form" class="update-form">
+				<label>更新包
+					<input id="system-update-file" class="text-input file-input" type="file" name="update" accept=".sanyin-update,application/vnd.sanyin.update+zip" ${enabled ? "" : "disabled"} required>
+				</label>
+				<button class="button" type="submit" ${enabled ? "" : "disabled"}>校验并更新</button>
+			</form>
+			<div class="capability-callout ${enabled ? "callout-info" : ""}">
+				<strong>${enabled ? "签名验证已启用" : "网页更新未启用"}</strong>
+				<span>${enabled ? "上传后先验证 Ed25519 签名、版本、SHA-256 与 ELF 平台，再原子替换；20 秒内未恢复 8787 端口会自动回滚。" : (app.data.environment === "device" ? "请先通过 SSH 或 ADB 安装 update-public-key 与设备侧更新脚本。" : "Mock 模式不会接收或执行更新包。")}</span>
+			</div>
+			<p class="update-note">网页更新只替换 sanyin-config 单文件；启动脚本或设备辅助脚本发生变化时，请通过 SSH 执行完整的 config-install。</p>
+		</section>`;
+}
+
+function openSystemUpdateConfirmation(form) {
+	const file = form.querySelector("#system-update-file")?.files?.[0];
+	if (!file) {
+		toast("请选择 .sanyin-update 文件");
+		return;
+	}
+	if (!file.name.endsWith(".sanyin-update")) {
+		toast("文件扩展名必须为 .sanyin-update");
+		return;
+	}
+	if (file.size <= 0 || file.size > 32 * 1024 * 1024) {
+		toast("更新包必须小于 32 MiB");
+		return;
+	}
+	app.pendingUpdateFile = file;
+	elements.dialogContent.innerHTML = `
+		<span class="dialog-kicker">SIGNED SYSTEM UPDATE</span>
+		<h2>安装 ${escapeHTML(file.name)}</h2>
+		<p>设备将验证更新包签名和目标平台。验证通过后，服务会短暂重启；如果新版本无法启动或 8787 端口未恢复，将自动切回上一版。</p>
+		<div class="capability-callout"><strong>连接会短暂中断</strong><span>更新期间不要断电。网页恢复后请核对版本号和最近更新状态。</span></div>
+		<div class="dialog-actions"><button class="button secondary" value="cancel">取消</button><button id="confirm-system-update" class="button" type="button">确认更新</button></div>`;
+	elements.dialog.showModal();
+}
+
+async function runSystemUpdate() {
+	const file = app.pendingUpdateFile;
+	if (!file) return;
+	app.pendingUpdateFile = null;
+	elements.dialogContent.innerHTML = `<span class="dialog-kicker">SIGNED SYSTEM UPDATE</span><h2>正在验证更新包</h2><div class="loading-state operation-loading"><span class="loader"></span><p>校验 Ed25519 签名、SHA-256、版本与 ARMv7 平台…</p></div>`;
+	try {
+		const response = await api.updateSystem(file);
+		await waitForSystemUpdate(response.data.version);
+	} catch (error) {
+		elements.dialogContent.innerHTML = `<span class="dialog-kicker">UPDATE REJECTED</span><h2>更新未开始</h2><p>${escapeHTML(error.message)}</p><div class="dialog-actions"><button class="button" value="done">关闭</button></div>`;
+	}
+}
+
+async function waitForSystemUpdate(expectedVersion) {
+	elements.dialogContent.innerHTML = `<span class="dialog-kicker">UPDATE ACCEPTED</span><h2>正在重启到 ${escapeHTML(expectedVersion)}</h2><div class="loading-state operation-loading"><span class="loader"></span><p>等待新服务完成健康检查；失败时设备会自动恢复上一版…</p></div>`;
+	for (let attempt = 0; attempt < 70; attempt += 1) {
+		await new Promise((resolve) => setTimeout(resolve, 1000));
+		try {
+			const response = await api.system();
+			const system = response.data;
+			if (system.build.version === expectedVersion && system.update.state === "succeeded") {
+				elements.dialogContent.innerHTML = `<span class="dialog-kicker">UPDATE SUCCEEDED</span><h2>已更新到 ${escapeHTML(expectedVersion)}</h2><p>${escapeHTML(system.update.message)}</p><div class="dialog-actions"><button class="button" data-action="reload" value="done">重新加载页面</button></div>`;
+				return;
+			}
+			if (["rolled_back", "rollback_failed", "failed"].includes(system.update.state)) {
+				elements.dialogContent.innerHTML = `<span class="dialog-kicker">UPDATE ROLLBACK</span><h2>${system.update.state === "rolled_back" ? "更新失败，已恢复上一版" : "更新或回滚需要人工处理"}</h2><p>${escapeHTML(system.update.message || "请通过 SSH 或 ADB 查看 /tmp/sanyin_update.log。")}</p><div class="dialog-actions"><button class="button" data-action="reload" value="done">重新加载页面</button></div>`;
+				return;
+			}
+		} catch {
+			// 服务重启窗口内连接失败是预期行为。
+		}
+	}
+	elements.dialogContent.innerHTML = `<span class="dialog-kicker">UPDATE TIMEOUT</span><h2>尚未确认更新结果</h2><p>设备在 70 秒内没有恢复网页连接。请通过 SSH 或 ADB 检查 sanyin_config 服务和 /tmp/sanyin_update.log。</p><div class="dialog-actions"><button class="button" value="done">关闭</button></div>`;
 }
 
 function openOperationConfirmation(simulation) {

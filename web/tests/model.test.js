@@ -239,3 +239,16 @@ test("网页提供本地 URL 播放、完整控制、队列和网络电台", asy
 	assert.match(css, /\.queue-list/);
 	assert.match(css, /\.station-grid/);
 });
+
+test("网页显示应用版本并只上传签名更新包", async () => {
+	const appSource = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
+	const apiSource = await readFile(new URL("../src/api.js", import.meta.url), "utf8");
+	assert.match(appSource, /id: "system"/);
+	assert.match(appSource, /id="system-update-form"/);
+	assert.match(appSource, /\.sanyin-update/);
+	assert.match(appSource, /Ed25519 签名/);
+	assert.match(appSource, /自动回滚/);
+	assert.match(apiSource, /system\(\)/);
+	assert.match(apiSource, /updateSystem\(file\)/);
+	assert.match(apiSource, /application\/vnd\.sanyin\.update\+zip/);
+});

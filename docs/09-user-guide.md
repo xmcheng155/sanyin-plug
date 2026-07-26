@@ -18,7 +18,8 @@
 2. Wi-Fi、蓝牙、EQ 和本地播放属于实验能力，正常路径已通过实机验收，但不同固件和异常场景覆盖仍不完整；
 3. 音量、静音、灯光、麦克风计划、闹钟和提醒目前不提供写入；
 4. 不要把音箱的 8787 端口映射到互联网；
-5. Wi-Fi 切换时最好保留 USB ADB 连接，便于目标网络不可达时确认回退状态。
+5. 首次安装和 SSH 公钥引导时保留 USB ADB；之后可以用 SSH 作为常规维护通道；
+6. Wi-Fi 切换时最好同时保留 USB ADB 或确认 SSH 救援路径，便于目标网络不可达时确认回退状态。
 
 ## 2. 首次安装
 
@@ -73,22 +74,62 @@ cd sanyin-plug
 
 安装内容位于可恢复的 overlay 中。守护服务会等待原厂播放器和 Wi-Fi 就绪，只在 TCP 5002 未监听时发送 AirPlay 恢复命令。
 
-### 2.5 安装三音 Plug 网页服务
+### 2.5 构建签名版本并安装三音 Plug 网页服务
 
 ```bash
-npm run build:armv7
+npm run package:update -- 1.8.0
 ./tools/sanyinctl --serial netease_XXXXXXXX config-install
 ./tools/sanyinctl --serial netease_XXXXXXXX config-status
 ```
+
+`package:update` 同时完成 ARMv7 构建和更新包签名。第一次运行会生成：
+
+- `.tools/update-signing-key`：Ed25519 私钥，只保留在开发电脑，权限为 `0600`；
+- `dist/update-public-key`：安装到音箱的验证公钥；
+- `dist/sanyin-config-linux-armv7`：完整安装使用的程序；
+- `dist/sanyin-plug-1.8.0.sanyin-update`：网页上传使用的签名包。
 
 `config-install` 会安装：
 
 - ARMv7 单文件服务；
 - OpenWrt/procd 启动项；
 - EQ 状态验收脚本；
-- Wi-Fi 切换与自动回退脚本。
+- Wi-Fi 切换与自动回退脚本；
+- 网页更新应用与回滚脚本；
+- 已生成时的更新验证公钥。
 
 服务会随音箱启动，并监听局域网 TCP 8787。
+
+### 2.6 启用 SSH 公钥运维
+
+先在开发电脑生成仅供音箱使用的 SSH 密钥：
+
+```bash
+ssh-keygen -t ed25519 -f .tools/sanyin-ssh -C sanyin-plug
+```
+
+通过首次 ADB 连接安装公钥并启用 SSH：
+
+```bash
+./tools/sanyinctl --serial netease_XXXXXXXX ssh-enable .tools/sanyin-ssh.pub
+```
+
+找到音箱 IP 后验证：
+
+```bash
+ssh -i .tools/sanyin-ssh root@192.168.1.50 true
+./tools/sanyinctl --host 192.168.1.50 --identity .tools/sanyin-ssh --known-hosts ~/.ssh/known_hosts doctor
+```
+
+`ssh-enable` 优先配置固件 Dropbear；固件没有 Dropbear 时会安装项目自带服务。两种实现都只保留 root 公钥认证；自带服务不提供端口转发、PTY 或 SFTP。运维工具使用公钥批处理模式，不会降级为交互密码。首次连接时应保留 ADB，核对目标 IP 后接受主机指纹；后续通过 `--known-hosts` 固定该指纹。若旧版 Dropbear 不支持所选密钥算法，请保留 ADB，改用该固件支持的 RSA/ECDSA 公钥，并把兼容性选项限制到该音箱的 Host 配置。
+
+需要在电脑上运行真实设备开发服务时：
+
+```bash
+npm run dev:ssh -- -ssh-host 192.168.1.50 -ssh-identity .tools/sanyin-ssh -ssh-known-hosts ~/.ssh/known_hosts
+```
+
+浏览器仍只访问电脑的 `127.0.0.1:8787`；后端通过 SSH 执行项目内固定探针，并把自有配置写入限制在 `/mnt/UDISK/sanyin-config/` 的单层文件中。
 
 ## 3. 打开网页
 
@@ -310,22 +351,49 @@ AirPlay 页面提供：
 
 ## 11. 更新版本
 
+### 11.1 通过 SSH 完整更新
+
 在项目目录执行：
 
 ```bash
 git pull
 npm test
-npm run build:armv7
-./tools/sanyinctl --serial netease_XXXXXXXX config-install
-./tools/sanyinctl --serial netease_XXXXXXXX config-status
+npm run package:update -- 1.8.1
+./tools/sanyinctl --host 192.168.1.50 --identity .tools/sanyin-ssh --known-hosts ~/.ssh/known_hosts --force config-install
+./tools/sanyinctl --host 192.168.1.50 --identity .tools/sanyin-ssh --known-hosts ~/.ssh/known_hosts config-status
 ```
+
+版本必须使用严格递增的 `X.Y.Z`。完整更新会同步二进制、procd 启动项、EQ/Wi-Fi 辅助脚本、更新回滚脚本和验证公钥，适合代码跨组件变化时使用。`--force` 只应在确认目标文件属于上一版三音 Plug 后使用。
 
 更新程序不会删除电台收藏、网页登录密码或 AirPlay 自动恢复配置。如果 AirPlay 守护脚本也有更新，再执行：
 
 ```bash
-./tools/sanyinctl --serial netease_XXXXXXXX install
-./tools/sanyinctl --serial netease_XXXXXXXX verify
+./tools/sanyinctl --host 192.168.1.50 --identity .tools/sanyin-ssh --force install
+./tools/sanyinctl --host 192.168.1.50 --identity .tools/sanyin-ssh verify
 ```
+
+### 11.2 从网页更新单文件服务
+
+当改动只涉及 Go 服务或内嵌网页时：
+
+1. 在开发电脑执行 `npm test`；
+2. 用更高版本执行 `npm run package:update -- 1.8.1`；
+3. 打开音箱网页的“版本”页面；
+4. 选择 `dist/sanyin-plug-1.8.1.sanyin-update`；
+5. 确认更新并等待页面恢复。
+
+设备会依次检查：
+
+- 更新包只包含约定的三个文件；
+- `manifest.json` 的 Ed25519 签名与设备公钥一致；
+- 程序 SHA-256 与清单一致；
+- 版本是严格递增的 `X.Y.Z`；
+- 程序是 Linux/ARMv7 小端 ELF；
+- 程序内置版本与清单一致。
+
+验证通过后，设备在同一文件系统中原子切换程序并重启服务。20 秒内未同时确认新进程和 TCP 8787 时，会恢复上一版并再次启动。更新状态保存在 `/mnt/UDISK/sanyin-config/update/update-status`，详细日志在 `/tmp/sanyin_update.log`。
+
+网页更新不会同步 init、EQ、Wi-Fi 或更新器脚本；这些文件发生变化时使用 11.1 的 SSH 完整更新。请备份 `.tools/update-signing-key` 到安全的离线位置；不要把它发送给音箱、提交 Git 或放入公开网盘。
 
 ## 12. 停止或恢复服务
 
@@ -340,20 +408,20 @@ npm run build:armv7
 临时停止网页配置服务：
 
 ```bash
-.tools/platform-tools/adb -s netease_XXXXXXXX shell /etc/init.d/sanyin_config stop
+ssh -i .tools/sanyin-ssh root@192.168.1.50 /etc/init.d/sanyin_config stop
 ```
 
 禁止下次开机启动：
 
 ```bash
-.tools/platform-tools/adb -s netease_XXXXXXXX shell /etc/init.d/sanyin_config disable
+ssh -i .tools/sanyin-ssh root@192.168.1.50 /etc/init.d/sanyin_config disable
 ```
 
 重新启用：
 
 ```bash
-.tools/platform-tools/adb -s netease_XXXXXXXX shell /etc/init.d/sanyin_config enable
-.tools/platform-tools/adb -s netease_XXXXXXXX shell /etc/init.d/sanyin_config start
+ssh -i .tools/sanyin-ssh root@192.168.1.50 /etc/init.d/sanyin_config enable
+ssh -i .tools/sanyin-ssh root@192.168.1.50 /etc/init.d/sanyin_config start
 ```
 
 当前工具没有自动删除网页服务和用户配置的命令，以避免误删电台、密码和网络事务数据。
@@ -398,3 +466,5 @@ npm run build:armv7
 - [能力等级与参数清单](05-local-config-api-and-parameter-inventory.md)。
 
 写请求要求与网页同源，并携带 `X-Sanyin-CSRF: 1`。启用 Basic Auth 后还需要用户名 `admin` 和当前密码。不要绕过三音 Plug 直接把原厂 KPlayer、EQ 或其他内部控制端口暴露给局域网或互联网。
+
+`POST /api/v1/system/update` 还要求媒体类型 `application/vnd.sanyin.update+zip`，并始终执行签名、哈希、版本与平台校验；不能上传裸二进制。

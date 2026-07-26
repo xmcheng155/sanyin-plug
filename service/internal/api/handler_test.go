@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"sanyin.local/config/service/internal/adapter"
 	"sanyin.local/config/service/internal/api"
 	"sanyin.local/config/service/internal/domain"
+	"sanyin.local/config/service/internal/updater"
 )
 
 var fixedTime = time.Date(2026, 7, 23, 9, 0, 0, 0, time.FixedZone("CST", 8*60*60))
@@ -289,13 +291,97 @@ func TestOpenAPIContractListsImplementedRoutes(t *testing.T) {
 		"/capabilities", "/device", "/status", "/airplay", "/network", "/audio",
 		"/bluetooth", "/lighting", "/schedules", "/events", "/airplay/recover",
 		"/airplay/auto-recover", "/network/switch", "/microphone/schedule", "/mock/scenarios",
-		"/audio/effect", "/player", "/player/control",
+		"/audio/effect", "/player", "/player/control", "/system", "/system/update",
 	}
 	for _, path := range expected {
 		if _, ok := paths[path]; !ok {
 			t.Errorf("OpenAPI missing implemented route %s", path)
 		}
 	}
+}
+
+type fakeUpdateManager struct {
+	info   domain.SystemInfo
+	result domain.UpdateAccepted
+	err    error
+	staged []byte
+}
+
+func (f *fakeUpdateManager) Info() domain.SystemInfo {
+	return f.info
+}
+
+func (f *fakeUpdateManager) Stage(_ context.Context, reader io.Reader, _ int64) (domain.UpdateAccepted, error) {
+	f.staged, _ = io.ReadAll(reader)
+	return f.result, f.err
+}
+
+func TestSystemEndpointReportsBuildAndSignedUpdateState(t *testing.T) {
+	manager := &fakeUpdateManager{info: domain.SystemInfo{
+		Build:         domain.BuildInfo{Version: "1.8.0", Commit: "abc123", BuiltAt: "2026-07-26T00:00:00Z"},
+		UpdateEnabled: true,
+		Update:        domain.UpdateStatus{State: "succeeded", Version: "1.8.0"},
+	}}
+	server := httptest.NewServer(api.NewHandler(
+		adapter.NewMockProviderWithClock(func() time.Time { return fixedTime }),
+		api.Options{Build: manager.info.Build, Updater: manager},
+	))
+	defer server.Close()
+
+	body := getJSON(t, server, api.BasePath+"/system")
+	data := body["data"].(map[string]any)
+	build := data["build"].(map[string]any)
+	if build["version"] != "1.8.0" || data["updateEnabled"] != true {
+		t.Fatalf("unexpected system info: %#v", data)
+	}
+
+	request, _ := http.NewRequest(http.MethodPost, server.URL+api.BasePath+"/system/update", bytes.NewReader([]byte("package")))
+	request.Header.Set("Content-Type", "application/vnd.sanyin.update+zip")
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("mock mode accepted a system update: %d", response.StatusCode)
+	}
+}
+
+func TestDeviceUpdateEndpointMapsVerificationResults(t *testing.T) {
+	t.Run("accepted", func(t *testing.T) {
+		manager := &fakeUpdateManager{
+			info:   domain.SystemInfo{UpdateEnabled: true},
+			result: domain.UpdateAccepted{Version: "1.8.1", State: "staged", Message: "ready"},
+		}
+		server := httptest.NewServer(api.NewHandler(adapter.NewRealProvider(realRunner{}), api.Options{Updater: manager}))
+		defer server.Close()
+		request, _ := http.NewRequest(http.MethodPost, server.URL+api.BasePath+"/system/update", bytes.NewReader([]byte("signed-package")))
+		request.Header.Set("Content-Type", "application/vnd.sanyin.update+zip")
+		response, err := server.Client().Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusAccepted || string(manager.staged) != "signed-package" {
+			t.Fatalf("update was not staged: status=%d body=%q", response.StatusCode, manager.staged)
+		}
+	})
+
+	t.Run("invalid signature", func(t *testing.T) {
+		manager := &fakeUpdateManager{info: domain.SystemInfo{UpdateEnabled: true}, err: updater.ErrInvalidSignature}
+		server := httptest.NewServer(api.NewHandler(adapter.NewRealProvider(realRunner{}), api.Options{Updater: manager}))
+		defer server.Close()
+		request, _ := http.NewRequest(http.MethodPost, server.URL+api.BasePath+"/system/update", bytes.NewReader([]byte("tampered")))
+		request.Header.Set("Content-Type", "application/vnd.sanyin.update+zip")
+		response, err := server.Client().Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusForbidden {
+			t.Fatalf("invalid signature returned %d", response.StatusCode)
+		}
+	})
 }
 
 type realRunner struct {

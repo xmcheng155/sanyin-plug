@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -35,14 +36,27 @@ type deviceFileStore interface {
 type ExecShellRunner struct {
 	command string
 	args    []string
+	local   bool
 }
 
 func NewADBShellRunner(adbPath, serial string) *ExecShellRunner {
 	return &ExecShellRunner{command: adbPath, args: []string{"-s", serial, "shell"}}
 }
 
+func NewSSHShellRunner(sshPath, user, host, identity, knownHosts string, port int) *ExecShellRunner {
+	args := []string{"-p", strconv.Itoa(port), "-o", "BatchMode=yes", "-o", "ConnectTimeout=8"}
+	if identity != "" {
+		args = append(args, "-o", "IdentitiesOnly=yes", "-i", identity)
+	}
+	if knownHosts != "" {
+		args = append(args, "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile="+knownHosts)
+	}
+	args = append(args, user+"@"+host)
+	return &ExecShellRunner{command: sshPath, args: args}
+}
+
 func NewLocalShellRunner() *ExecShellRunner {
-	return &ExecShellRunner{command: "/bin/sh", args: []string{"-c"}}
+	return &ExecShellRunner{command: "/bin/sh", args: []string{"-c"}, local: true}
 }
 
 func (r *ExecShellRunner) Run(ctx context.Context, script string) (string, error) {
@@ -56,13 +70,25 @@ func (r *ExecShellRunner) Run(ctx context.Context, script string) (string, error
 }
 
 func (r *ExecShellRunner) WriteDeviceFile(ctx context.Context, filename string, content []byte, mode os.FileMode) error {
-	if r.command != "/bin/sh" {
-		return ErrCapabilityNotReady
-	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if !validManagedDevicePath(filename) {
+		return errors.New("write device file: path is outside managed config directory")
+	}
 	temporary := filename + ".tmp"
+	if !r.local {
+		script := fmt.Sprintf("umask 077; cat > '%s' && chmod %04o '%s' && mv '%s' '%s'",
+			temporary, mode.Perm(), temporary, temporary, filename)
+		args := append(append([]string{}, r.args...), script)
+		command := exec.CommandContext(ctx, r.command, args...)
+		command.Stdin = bytes.NewReader(content)
+		output, err := command.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("write device file: %w: %s", err, strings.TrimSpace(string(output)))
+		}
+		return nil
+	}
 	if err := os.WriteFile(temporary, content, mode); err != nil {
 		return fmt.Errorf("write device file: %w", err)
 	}
@@ -78,24 +104,45 @@ func (r *ExecShellRunner) WriteDeviceFile(ctx context.Context, filename string, 
 }
 
 func (r *ExecShellRunner) RemoveDeviceFile(filename string) error {
-	if r.command != "/bin/sh" {
-		return ErrCapabilityNotReady
+	if !validManagedDevicePath(filename) {
+		return errors.New("remove device file: path is outside managed config directory")
+	}
+	if !r.local {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		args := append(append([]string{}, r.args...), fmt.Sprintf("rm -f '%s'", filename))
+		output, err := exec.CommandContext(ctx, r.command, args...).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("remove device file: %w: %s", err, strings.TrimSpace(string(output)))
+		}
+		return nil
 	}
 	return os.Remove(filename)
 }
 
 func (r *ExecShellRunner) ReadDeviceFile(ctx context.Context, filename string) ([]byte, error) {
-	if r.command != "/bin/sh" {
-		return nil, ErrCapabilityNotReady
-	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if !validManagedDevicePath(filename) {
+		return nil, errors.New("read device file: path is outside managed config directory")
+	}
+	if !r.local {
+		args := append(append([]string{}, r.args...), fmt.Sprintf("cat '%s'", filename))
+		output, err := exec.CommandContext(ctx, r.command, args...).Output()
+		if err != nil {
+			if exit, ok := err.(*exec.ExitError); ok {
+				return nil, fmt.Errorf("read device file: %w: %s", err, strings.TrimSpace(string(exit.Stderr)))
+			}
+			return nil, fmt.Errorf("read device file: %w", err)
+		}
+		return output, nil
 	}
 	return os.ReadFile(filename)
 }
 
 func (r *ExecShellRunner) DeviceHTTPHost(ctx context.Context) (string, error) {
-	if r.command == "/bin/sh" {
+	if r.local {
 		return "127.0.0.1", nil
 	}
 	output, err := r.Run(ctx, `address="$(ifconfig wlan0 2>/dev/null | sed -n 's/.*inet addr:\([^ ]*\).*/\1/p' | head -n 1)"; printf 'device_ip=%s\n' "$address"`)
@@ -107,6 +154,23 @@ func (r *ExecShellRunner) DeviceHTTPHost(ctx context.Context) (string, error) {
 		return "", errors.New("device Wi-Fi address is unavailable")
 	}
 	return address, nil
+}
+
+func validManagedDevicePath(filename string) bool {
+	const prefix = "/mnt/UDISK/sanyin-config/"
+	if !strings.HasPrefix(filename, prefix) {
+		return false
+	}
+	name := strings.TrimPrefix(filename, prefix)
+	if name == "" || strings.Contains(name, "/") {
+		return false
+	}
+	for _, char := range name {
+		if !(char >= 'a' && char <= 'z') && !(char >= 'A' && char <= 'Z') && !(char >= '0' && char <= '9') && char != '.' && char != '_' && char != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 type RealProvider struct {

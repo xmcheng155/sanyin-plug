@@ -20,6 +20,8 @@
 | 播放队列 | 添加、选择、移除、清空并自动续播 | 实验能力 |
 | 网络电台 | 收藏、播放、加入队列、调整顺序和删除直播流 | 实验能力，收藏列表及顺序重启后保留 |
 | 定时停止 | 设置 1–60 分钟后由音箱自动停止播放 | 实验能力，关闭浏览器后仍有效 |
+| SSH 运维 | 使用公钥登录，通过局域网执行检查、安装、备份和调试 | 首次公钥写入仍建议保留 USB ADB |
+| 网页版本更新 | 上传 Ed25519 签名更新包，自动校验、重启和失败回滚 | 只更新内嵌网页的单文件服务 |
 | Mock 开发模式 | 无需音箱即可运行完整网页和状态场景 | 不连接或修改真实设备 |
 
 音量、静音、灯光、麦克风计划、闹钟和提醒尚未达到可靠写入标准，目前只展示可确认的状态或保持操作禁用。
@@ -36,10 +38,11 @@
         ├── KPlayer UPnP AVTransport
         ├── 自有 AirPlay 恢复配置
         ├── 自有 Wi-Fi 回退事务
-        └── 自有网络电台收藏
+        ├── 自有网络电台收藏
+        └── 签名更新、健康检查与自动回滚
 ```
 
-正式安装后，网页和 API 都在音箱本机运行，不需要电脑持续在线。电脑只在首次安装、更新或故障恢复时通过 USB ADB 使用。
+正式安装后，网页和 API 都在音箱本机运行，不需要电脑持续在线。USB ADB 只用于首次引导和失联救援；写入 SSH 公钥后，常规状态检查、完整安装和调试都可以通过局域网 SSH 完成。应用单文件更新也可以直接从网页上传。
 
 ## 快速安装
 
@@ -80,19 +83,38 @@ go version
 
 该服务只在原厂 AirPlay 端口缺失且音箱网络已就绪时发送已验证的恢复命令。
 
-### 3. 安装完整网页服务
+### 3. 构建签名版本并安装完整网页服务
 
 ```bash
-npm run build:armv7
+npm run package:update -- 1.8.0
 ./tools/sanyinctl --serial netease_XXXXXXXX config-install
 ./tools/sanyinctl --serial netease_XXXXXXXX config-status
 ```
+
+首次运行 `package:update` 会在 `.tools/update-signing-key` 生成 Ed25519 私钥，在 `dist/` 生成设备公钥、ARMv7 程序和 `.sanyin-update` 文件。私钥只保留在开发电脑，不会安装到音箱或进入 Git。
 
 安装完成后，从路由器管理页面或系统网络列表找到音箱 IP，然后访问：
 
 ```text
 http://音箱IP:8787/
 ```
+
+### 4. 启用 SSH 公钥运维
+
+```bash
+ssh-keygen -t ed25519 -f .tools/sanyin-ssh -C sanyin-plug
+./tools/sanyinctl --serial netease_XXXXXXXX ssh-enable .tools/sanyin-ssh.pub
+ssh -i .tools/sanyin-ssh root@192.168.1.50 true  # 保留 ADB 时核对并接受首次主机指纹
+./tools/sanyinctl --host 192.168.1.50 --identity .tools/sanyin-ssh --known-hosts ~/.ssh/known_hosts doctor
+```
+
+后续完整更新可直接走 SSH：
+
+```bash
+./tools/sanyinctl --host 192.168.1.50 --identity .tools/sanyin-ssh --known-hosts ~/.ssh/known_hosts --force config-install
+```
+
+`ssh-enable` 优先配置固件 Dropbear；固件没有 Dropbear 时安装项目自带的轻量 SSH 服务。两种方式都只开放 root 公钥认证；自带服务还会拒绝端口转发、PTY 和子系统。请在确认 SSH 公钥可用前保留 USB ADB。
 
 完整操作步骤见 [三音 Plug 使用手册](docs/09-user-guide.md)。
 
@@ -105,6 +127,7 @@ http://音箱IP:8787/
 - **音频与 EQ**：查看音频状态并切换固定 EQ 模式；
 - **蓝牙**：发送开启或关闭请求，并查看最近一次验收结果；
 - **诊断**：查看灯光、计划任务和归一化事件，不展示原始敏感日志。
+- **版本**：查看应用版本与最近更新状态，上传签名 `.sanyin-update` 文件。
 
 页面中的“实验能力”表示正常路径已经通过实机验证，但异常网络、断电窗口、音源抢占或不同固件覆盖仍不完整。它不是模拟功能，也不等同于完全无风险。
 
@@ -150,7 +173,7 @@ Wi-Fi 切换由音箱端事务执行：先备份当前配置，再尝试连接�
 
 | 命令 | 用途 | 是否修改音箱 |
 | --- | --- | --- |
-| `sanyinctl doctor` | 检查 ADB、型号、系统和依赖 | 否 |
+| `sanyinctl doctor` | 检查 ADB/SSH 连接、型号、系统和依赖 | 否 |
 | `sanyinctl status` | 查看 AirPlay 守护服务、端口和日志 | 否 |
 | `sanyinctl verify` | 从音箱和电脑两侧验证 AirPlay | 否 |
 | `sanyinctl logs` | 查看 AirPlay 恢复日志 | 否 |
@@ -161,9 +184,12 @@ Wi-Fi 切换由音箱端事务执行：先备份当前配置，再尝试连接�
 | `sanyinctl config-status` | 查看网页服务、8787 端口和认证状态 | 否 |
 | `sanyinctl config-auth-enable` | 生成并启用网页登录密码 | 是，自有配置 |
 | `sanyinctl config-auth-disable` | 禁用网页登录密码 | 是，自有配置 |
+| `sanyinctl ssh-enable PUBKEY` | 安装公钥并启用固件 Dropbear 或三音 SSH 服务 | 是，UDISK 与 overlay |
 | `sanyinctl backup [目录]` | 备份 11 个 NAND 分区 | 仅读 NAND，使用 `/tmp` 中转 |
 
 写入或重启命令会要求确认；自动化场景可加 `--yes`。目标设备存在内容不同的同名文件时，安装默认停止，可在核对后使用 `--force`。
+
+除 `ssh-enable` 外，命令都可以增加 `--host IP --identity 私钥` 改走 SSH。建议同时通过 `--known-hosts 文件` 固定主机指纹。SSH 模式使用 `BatchMode=yes` 和 `IdentitiesOnly=yes`，不会回退到交互密码或其他密钥。
 
 ## 本地开发
 
@@ -187,6 +213,14 @@ npm run dev:real
 go run ./service/cmd/sanyin-config -mode adb -serial netease_XXXXXXXX
 ```
 
+SSH 真实设备开发模式：
+
+```bash
+npm run dev:ssh -- -ssh-host 192.168.1.50 -ssh-identity .tools/sanyin-ssh -ssh-known-hosts ~/.ssh/known_hosts
+```
+
+该模式通过公钥 SSH 执行固定状态探针和自有配置文件读写，适合不接 USB 的日常调试。它不会开放远端 shell 给浏览器。
+
 开发模式默认只监听 `127.0.0.1:8787`，不会自动向局域网开放。
 
 ## 测试与构建
@@ -200,6 +234,9 @@ npm run build
 
 # 构建音箱使用的 Linux/ARMv7 单文件程序
 npm run build:armv7
+
+# 构建 X.Y.Z 版本并生成 Ed25519 签名网页更新包
+npm run package:update -- 1.8.0
 ```
 
 网页资源通过 Go `embed` 进入单文件程序，不依赖 CDN。构建产物位于 `dist/`，不会进入 Git 仓库。
@@ -234,6 +271,7 @@ Mock 与真实设备共用同一套 HTTP 契约。HTTP 路由不会直接访问 
 
 - 不修改 bootloader、内核或只读 SquashFS；自有服务和配置位于 overlay 与 UDISK；
 - 不直接修改厂商 SQLite，不把原厂无认证内部接口暴露给浏览器；
+- 网页更新只接受 Ed25519 签名、SHA-256 一致、目标为 Linux/ARMv7 且版本严格递增的包；私钥永不上传；
 - `backups/`、`.tools/protocol-captures/` 和 `dist/` 不进入 Git；
 - NAND 备份可能包含 Wi-Fi 密码、设备令牌和播放记录，不要上传网盘或公开仓库；
 - 默认无密码模式只适合可信局域网，跨网段、访客网络或端口映射场景应启用认证；

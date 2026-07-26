@@ -42,6 +42,15 @@ export class ApiClient {
   lighting() { return this.request("/lighting"); }
   schedules() { return this.request("/schedules"); }
 	player() { return this.request("/player"); }
+	system() { return this.request("/system"); }
+
+	updateSystem(file) {
+		return this.request("/system/update", {
+			method: "POST",
+			headers: { "Content-Type": "application/vnd.sanyin.update+zip" },
+			body: file,
+		});
+	}
 
 	controlPlayer(action, payload = {}) {
 		return this.request("/player/control", {

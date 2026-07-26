@@ -152,6 +152,27 @@ func TestRealAdapterReturnsCurrentDeviceStateAndSafeCapabilities(t *testing.T) {
 	}
 }
 
+func TestSSHShellRunnerUsesKeyOnlyConnectionAndRestrictsManagedFiles(t *testing.T) {
+	runner := NewSSHShellRunner("/usr/bin/ssh", "root", "192.168.1.50", "/tmp/sanyin-key", "/tmp/sanyin-known-hosts", 2222)
+	joined := strings.Join(runner.args, " ")
+	if runner.command != "/usr/bin/ssh" || !strings.Contains(joined, "-p 2222") || !strings.Contains(joined, "BatchMode=yes") || !strings.Contains(joined, "IdentitiesOnly=yes") || !strings.Contains(joined, "-i /tmp/sanyin-key") || !strings.Contains(joined, "StrictHostKeyChecking=yes") || !strings.Contains(joined, "UserKnownHostsFile=/tmp/sanyin-known-hosts") || !strings.HasSuffix(joined, "root@192.168.1.50") {
+		t.Fatalf("unexpected SSH runner: command=%q args=%q", runner.command, joined)
+	}
+	if !validManagedDevicePath("/mnt/UDISK/sanyin-config/radio-stations.json") {
+		t.Fatal("managed application state path was rejected")
+	}
+	for _, filename := range []string{
+		"/etc/passwd",
+		"/mnt/UDISK/sanyin-config/../wifi/config",
+		"/mnt/UDISK/sanyin-config/subdir/file",
+		"/mnt/UDISK/sanyin-config/value;reboot",
+	} {
+		if validManagedDevicePath(filename) {
+			t.Fatalf("unsafe device path was accepted: %s", filename)
+		}
+	}
+}
+
 func TestWiFiSwitchUsesProtectedFilesAndReportsRollback(t *testing.T) {
 	runner := &recordingRunner{}
 	device, _ := NewRealProviderWithClock(runner, func() time.Time { return time.UnixMilli(3344) }).ForScenario(LiveScenario)

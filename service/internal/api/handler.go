@@ -1,25 +1,50 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"strings"
 
 	"sanyin.local/config/service/internal/adapter"
 	"sanyin.local/config/service/internal/domain"
+	"sanyin.local/config/service/internal/updater"
 )
 
 const BasePath = "/api/v1"
 
 type Handler struct {
 	provider adapter.Provider
+	build    domain.BuildInfo
+	updater  UpdateManager
 }
 
-func NewHandler(provider adapter.Provider) http.Handler {
-	return &Handler{provider: provider}
+type UpdateManager interface {
+	Info() domain.SystemInfo
+	Stage(context.Context, io.Reader, int64) (domain.UpdateAccepted, error)
+}
+
+type Options struct {
+	Build   domain.BuildInfo
+	Updater UpdateManager
+}
+
+func NewHandler(provider adapter.Provider, options ...Options) http.Handler {
+	handler := &Handler{
+		provider: provider,
+		build:    domain.BuildInfo{Version: "dev", Commit: "unknown", BuiltAt: "unknown"},
+	}
+	if len(options) > 0 {
+		if options[0].Build.Version != "" {
+			handler.build = options[0].Build
+		}
+		handler.updater = options[0].Updater
+	}
+	return handler
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -34,9 +59,30 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if path == BasePath && r.Method == http.MethodGet {
 		h.writeJSON(w, http.StatusOK, map[string]any{
 			"apiVersion":  "v1",
+			"appVersion":  h.build.Version,
 			"environment": h.provider.Environment(),
 			"basePath":    BasePath,
 		})
+		return
+	}
+	if path == BasePath+"/system" {
+		if r.Method != http.MethodGet {
+			h.methodNotAllowed(w, http.MethodGet)
+			return
+		}
+		info := domain.SystemInfo{Build: h.build, UpdateEnabled: false, Update: domain.UpdateStatus{State: "idle"}}
+		if h.updater != nil {
+			info = h.updater.Info()
+		}
+		h.writeJSON(w, http.StatusOK, domain.Envelope[domain.SystemInfo]{
+			Environment: h.provider.Environment(),
+			Scenario:    h.provider.DefaultScenario(),
+			Data:        info,
+		})
+		return
+	}
+	if path == BasePath+"/system/update" {
+		h.handleUpdate(w, r)
 		return
 	}
 	if path == BasePath+"/mock/scenarios" && r.Method == http.MethodGet {
@@ -261,6 +307,45 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.writeError(w, http.StatusNotFound, "not_found", "接口不存在")
+}
+
+func (h *Handler) handleUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		h.methodNotAllowed(w, http.MethodPost)
+		return
+	}
+	if h.provider.Environment() != "device" || h.updater == nil {
+		h.writeError(w, http.StatusConflict, "update_unavailable", "当前运行模式未启用网页更新")
+		return
+	}
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/vnd.sanyin.update+zip" {
+		h.writeError(w, http.StatusUnsupportedMediaType, "invalid_update_media_type", "请选择 .sanyin-update 签名更新包")
+		return
+	}
+	accepted, err := h.updater.Stage(r.Context(), r.Body, r.ContentLength)
+	if err != nil {
+		switch {
+		case errors.Is(err, updater.ErrDisabled):
+			h.writeError(w, http.StatusConflict, "update_disabled", "设备尚未配置网页更新公钥")
+		case errors.Is(err, updater.ErrBusy):
+			h.writeError(w, http.StatusConflict, "update_busy", "已有更新正在处理")
+		case errors.Is(err, updater.ErrInvalidSignature):
+			h.writeError(w, http.StatusForbidden, "invalid_update_signature", "更新包签名无效")
+		case errors.Is(err, updater.ErrNotNewer):
+			h.writeError(w, http.StatusConflict, "update_not_newer", err.Error())
+		case errors.Is(err, updater.ErrInvalidPackage):
+			h.writeError(w, http.StatusBadRequest, "invalid_update_package", err.Error())
+		default:
+			h.writeError(w, http.StatusInternalServerError, "update_failed", "无法暂存更新包")
+		}
+		return
+	}
+	h.writeJSON(w, http.StatusAccepted, domain.Envelope[domain.UpdateAccepted]{
+		Environment: h.provider.Environment(),
+		Scenario:    h.provider.DefaultScenario(),
+		Data:        accepted,
+	})
 }
 
 func validPlayerCommand(command domain.PlayerCommand) bool {

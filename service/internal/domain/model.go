@@ -197,6 +197,31 @@ type Operation struct {
 	Timeline          []OperationStep `json:"timeline"`
 }
 
+type BuildInfo struct {
+	Version string `json:"version"`
+	Commit  string `json:"commit"`
+	BuiltAt string `json:"builtAt"`
+}
+
+type UpdateStatus struct {
+	State     string `json:"state"`
+	Version   string `json:"version,omitempty"`
+	Message   string `json:"message,omitempty"`
+	UpdatedAt string `json:"updatedAt,omitempty"`
+}
+
+type SystemInfo struct {
+	Build         BuildInfo    `json:"build"`
+	UpdateEnabled bool         `json:"updateEnabled"`
+	Update        UpdateStatus `json:"update"`
+}
+
+type UpdateAccepted struct {
+	Version string `json:"version"`
+	State   string `json:"state"`
+	Message string `json:"message"`
+}
+
 type APIError struct {
 	Error ErrorBody `json:"error"`
 }

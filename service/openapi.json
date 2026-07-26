@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "三音本地配置服务 API",
-	"version": "1.7.0",
-	"description": "同一套契约支持 Mock 与真实设备模式；真实设备开放 AirPlay、安全局域网状态读取、KPlayer 本地 URL/队列/网络电台播放、0..100 音量回读调节与最长 60 分钟的设备端定时停止，以及带设备验收或自动回退的实验性蓝牙、EQ 与 Wi-Fi 配置。"
+	"version": "1.8.0",
+	"description": "同一套契约支持 Mock 与真实设备模式；真实设备开放 AirPlay、安全局域网状态读取、KPlayer 本地 URL/队列/网络电台播放、0..100 音量回读调节与最长 60 分钟的设备端定时停止，以及带设备验收或自动回退的实验性蓝牙、EQ 与 Wi-Fi 配置。系统接口提供应用版本读取，以及经过 Ed25519 签名、平台与哈希校验、健康检查和自动回滚的单文件更新。"
   },
   "servers": [{ "url": "/api/v1" }],
   "paths": {
@@ -24,6 +24,8 @@
 	"/airplay/auto-recover": { "put": { "summary": "修改 AirPlay 自动恢复配置", "description": "仅真实设备模式可用；原子写入自有配置并回读验收，不修改厂商数据库。", "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["enabled"], "properties": { "enabled": { "type": "boolean" } }, "additionalProperties": false } } } }, "responses": { "202": { "$ref": "#/components/responses/JSONEnvelope" }, "400": { "description": "请求格式无效" }, "409": { "$ref": "#/components/responses/NotReady" } } } },
     "/network/switch": { "post": { "summary": "切换 Wi-Fi 并在失败时自动回退", "description": "音箱端先备份当前配置，再验收目标 SSID、IPv4、默认路由和网关可达；45 秒内失败则恢复原配置并重新联网。密码不进入响应或日志，事务完成后删除临时文件。", "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["ssid", "password"], "properties": { "ssid": { "type": "string", "minLength": 1, "maxLength": 32 }, "password": { "type": "string", "description": "空字符串表示开放网络；否则为 8..63 字节密码或 64 位十六进制 PSK。" } }, "additionalProperties": false } } } }, "responses": { "202": { "$ref": "#/components/responses/JSONEnvelope" }, "400": { "description": "SSID 或密码格式无效" }, "409": { "$ref": "#/components/responses/NotReady" } } } },
     "/microphone/schedule": { "put": { "summary": "预留麦克风计划写接口", "responses": { "409": { "$ref": "#/components/responses/NotReady" } } } },
+	"/system": { "get": { "summary": "读取应用构建信息与最近更新状态", "responses": { "200": { "$ref": "#/components/responses/JSONEnvelope" } } } },
+	"/system/update": { "post": { "summary": "上传签名应用更新包", "description": "仅真实设备且已安装 Ed25519 更新公钥时可用。请求体必须为不超过 32 MiB 的 .sanyin-update ZIP，包含精确的 manifest.json、sanyin-config 和 signature.ed25519。服务校验签名、SHA-256、严格递增的 X.Y.Z 版本及 Linux/ARMv7 ELF 后暂存；设备侧脚本原子替换并检查进程与 TCP 8787，失败自动恢复上一版。该接口只更新嵌入网页的 sanyin-config 单文件。", "requestBody": { "required": true, "content": { "application/vnd.sanyin.update+zip": { "schema": { "type": "string", "format": "binary", "maxLength": 33554432 } } } }, "responses": { "202": { "$ref": "#/components/responses/JSONEnvelope" }, "400": { "description": "更新包格式、版本、哈希或目标平台无效" }, "403": { "description": "Ed25519 签名无效" }, "409": { "description": "更新未启用、正在处理或版本不高于当前版本" }, "415": { "description": "Content-Type 无效" } } } },
     "/mock/scenarios": { "get": { "summary": "列出可用 Mock 场景", "responses": { "200": { "$ref": "#/components/responses/JSONEnvelope" } } } }
   },
   "components": {

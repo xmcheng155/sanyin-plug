@@ -8,9 +8,21 @@ CONFIG_BINARY="$ROOT_DIR/dist/sanyin-config-linux-armv7"
 CONFIG_INIT_SCRIPT="$ROOT_DIR/scripts/sanyin_config.init"
 EQ_PROBE_SCRIPT="$ROOT_DIR/scripts/eq_event_probe.sh"
 WIFI_SWITCH_SCRIPT="$ROOT_DIR/scripts/wifi_switch_transaction.sh"
+UPDATE_APPLY_SCRIPT="$ROOT_DIR/scripts/sanyin_apply_update.sh"
+UPDATE_PUBLIC_KEY="$ROOT_DIR/dist/update-public-key"
+SSH_SERVER_BINARY="$ROOT_DIR/dist/sanyin-sshd-linux-armv7"
+SSH_SERVER_INIT="$ROOT_DIR/scripts/sanyin_sshd.init"
 
 ADB_BIN="${ADB:-}"
 SERIAL="${SANYIN_SERIAL:-}"
+TRANSPORT=adb
+SSH_HOST=""
+SSH_USER=root
+SSH_PORT=22
+SSH_IDENTITY=""
+SSH_KNOWN_HOSTS=""
+SSH_BIN=""
+SSH_CONNECT_TIMEOUT=8
 ASSUME_YES=0
 FORCE=0
 
@@ -21,12 +33,17 @@ usage() {
 全局选项：
   --adb PATH       指定 adb 可执行文件
   --serial SERIAL  指定 ADB 设备序列号
+  --host HOST      通过 SSH 连接音箱 IP 或主机名（设置后不再使用 ADB）
+  --user USER      SSH 用户名，默认 root
+  --port PORT      SSH 端口，默认 22
+  --identity FILE  SSH 私钥文件
+  --known-hosts FILE  独立的 SSH known_hosts 文件
   --yes, -y        跳过写入/重启确认
   --force          允许覆盖内容不同的已安装脚本
   --help, -h       显示帮助
 
 命令：
-  doctor           检查 ADB、设备身份、系统和依赖
+  doctor           检查当前连接、设备身份、系统和依赖
   status           查看持久服务、恢复日志和 5002 端口
   verify           从设备和 Mac 两侧验证 AirPlay
   logs             查看恢复日志
@@ -39,10 +56,13 @@ usage() {
   config-password  查看网页登录认证状态和当前密码
   config-auth-enable  生成密码并启用网页登录认证
   config-auth-disable 禁用网页登录认证（默认）
+  ssh-enable PUBKEY  安装公钥并启用固件 Dropbear 或三音 SSH 服务
 
 示例：
   ./tools/sanyinctl doctor
   ./tools/sanyinctl --serial netease_XXXXXXXX status
+  ./tools/sanyinctl ssh-enable ~/.ssh/sanyin.pub
+  ./tools/sanyinctl --host 192.168.1.50 --identity ~/.ssh/sanyin config-install
   ./tools/sanyinctl backup backups/刷机前
 EOF
 }
@@ -110,18 +130,79 @@ find_device() {
     fi
 }
 
+find_ssh() {
+	[[ "$SSH_USER" =~ ^[A-Za-z0-9._-]+$ ]] || die "SSH 用户名包含非法字符。"
+	[[ "$SSH_PORT" =~ ^[0-9]+$ ]] && [[ "$SSH_PORT" -ge 1 && "$SSH_PORT" -le 65535 ]] || die "SSH 端口必须为 1..65535。"
+	[[ "$SSH_HOST" != -* && "$SSH_HOST" != *[[:space:]/]* ]] || die "SSH 主机名或 IP 无效。"
+	if [[ -n "$SSH_IDENTITY" ]]; then
+		[[ -r "$SSH_IDENTITY" ]] || die "SSH 私钥不可读：$SSH_IDENTITY"
+	fi
+	if [[ -n "$SSH_KNOWN_HOSTS" ]]; then
+		[[ -r "$SSH_KNOWN_HOSTS" ]] || die "SSH known_hosts 不可读：$SSH_KNOWN_HOSTS"
+	fi
+	SSH_BIN="$(command -v ssh || true)"
+	[[ -x "$SSH_BIN" ]] || die "本机缺少 ssh。"
+	SERIAL="${SSH_USER}@${SSH_HOST}:${SSH_PORT}"
+}
+
+find_transport() {
+	if [[ -n "$SSH_HOST" ]]; then
+		TRANSPORT=ssh
+		find_ssh
+	else
+		TRANSPORT=adb
+		find_adb
+		find_device
+	fi
+}
+
 adb_run() {
     "$ADB_BIN" -s "$SERIAL" "$@"
 }
 
+ssh_run() {
+	local options=(-p "$SSH_PORT" -o BatchMode=yes -o "ConnectTimeout=$SSH_CONNECT_TIMEOUT")
+	if [[ -n "$SSH_IDENTITY" ]]; then
+		options+=(-o IdentitiesOnly=yes -i "$SSH_IDENTITY")
+	fi
+	if [[ -n "$SSH_KNOWN_HOSTS" ]]; then
+		options+=(-o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$SSH_KNOWN_HOSTS")
+	fi
+	"$SSH_BIN" "${options[@]}" "${SSH_USER}@${SSH_HOST}" "$@"
+}
+
 device_shell() {
-    adb_run shell "$@"
+	if [[ "$TRANSPORT" == "ssh" ]]; then
+		ssh_run "$@"
+	else
+		adb_run shell "$@"
+	fi
+}
+
+device_push() {
+	local local_file="$1"
+	local remote_file="$2"
+	if [[ "$TRANSPORT" == "ssh" ]]; then
+		ssh_run "umask 077; cat > '$remote_file'" <"$local_file"
+	else
+		adb_run push "$local_file" "$remote_file"
+	fi
+}
+
+device_pull() {
+	local remote_file="$1"
+	local local_file="$2"
+	if [[ "$TRANSPORT" == "ssh" ]]; then
+		ssh_run "cat '$remote_file'" >"$local_file"
+	else
+		adb_run pull "$remote_file" "$local_file"
+	fi
 }
 
 device_test() {
 	local condition="$1"
 	local result
-	result="$(device_shell "if $condition; then printf true; else printf false; fi" | tr -d '\r')"
+	result="$(device_shell "if $condition; then printf true; else printf false; fi" 2>/dev/null | tr -d '\r')" || return 1
 	[[ "$result" == "true" ]]
 }
 
@@ -165,10 +246,16 @@ ensure_replace_allowed() {
 }
 
 cmd_doctor() {
-    info "ADB：$ADB_BIN"
-    "$ADB_BIN" version | sed -n '1,3p'
-    info "设备：$SERIAL"
-    adb_run get-state
+	if [[ "$TRANSPORT" == "ssh" ]]; then
+		info "传输：SSH（${SERIAL}）"
+		"$SSH_BIN" -V 2>&1 | sed -n '1p'
+		device_shell 'printf "ssh=connected\n"'
+	else
+		info "ADB：$ADB_BIN"
+		"$ADB_BIN" version | sed -n '1,3p'
+		info "设备：$SERIAL"
+		adb_run get-state
+	fi
     info "身份与内核"
     device_shell 'id; uname -a; cat /proc/version'
     info "固件与关键组件"
@@ -202,8 +289,8 @@ cmd_install() {
     local remote_device="/tmp/airplay_restore.sh.$suffix"
     local remote_init="/tmp/airplay_restore.init.$suffix"
 
-    adb_run push "$DEVICE_SCRIPT" "$remote_device"
-    adb_run push "$INIT_SCRIPT" "$remote_init"
+    device_push "$DEVICE_SCRIPT" "$remote_device"
+    device_push "$INIT_SCRIPT" "$remote_init"
     device_shell cp "$remote_device" /usr/bin/airplay_restore.sh
     device_shell chmod 0755 /usr/bin/airplay_restore.sh
     device_shell cp "$remote_init" /etc/init.d/airplay_restore
@@ -258,7 +345,7 @@ cmd_backup() {
         expected="$(expected_size "$partition")"
         info "读取 /dev/${partition}（预期 $expected 字节）"
         device_shell dd "if=/dev/$partition" "of=$remote_temp" bs=1048576
-        adb_run pull "$remote_temp" "$destination/$partition.img"
+        device_pull "$remote_temp" "$destination/$partition.img"
         device_shell rm -f "$remote_temp"
         actual="$(file_size "$destination/$partition.img")"
         [[ "$actual" == "$expected" ]] || die "$partition 大小异常：实际 ${actual}，预期 $expected"
@@ -324,10 +411,36 @@ cmd_verify() {
 
 cmd_reboot() {
     confirm "将重启 ${SERIAL}，并等待 AirPlay 最多约 90 秒，继续吗？" || die "用户取消。"
-    adb_run reboot
-    info "等待 ADB 重新连接……"
-    adb_run wait-for-device
-    info "ADB 已连接，等待 Wi-Fi 与 AirPlay 端口……"
+	if [[ "$TRANSPORT" == "ssh" ]]; then
+		device_shell reboot >/dev/null 2>&1 || true
+		info "等待 SSH 断开……"
+		local disconnected=0 connected=0 deadline
+		deadline=$((SECONDS + 30))
+		while ((SECONDS < deadline)); do
+			if ! SSH_CONNECT_TIMEOUT=2 ssh_run 'true' >/dev/null 2>&1; then
+				disconnected=1
+				break
+			fi
+			sleep 1
+		done
+		[[ "$disconnected" -eq 1 ]] || die "30 秒内 SSH 未断开，无法确认设备已执行重启。"
+		info "SSH 已断开，等待重新连接……"
+		deadline=$((SECONDS + 90))
+		while ((SECONDS < deadline)); do
+			if SSH_CONNECT_TIMEOUT=2 ssh_run 'true' >/dev/null 2>&1; then
+				connected=1
+				break
+			fi
+			sleep 1
+		done
+		[[ "$connected" -eq 1 ]] || die "90 秒内 SSH 未重新连接。"
+		info "SSH 已连接，等待 Wi-Fi 与 AirPlay 端口……"
+	else
+		adb_run reboot
+		info "等待 ADB 重新连接……"
+		adb_run wait-for-device
+		info "ADB 已连接，等待 Wi-Fi 与 AirPlay 端口……"
+	fi
     if wait_for_port 45; then
         info "重启后 TCP 5002 已自动恢复。"
         cmd_verify
@@ -340,7 +453,7 @@ cmd_reboot() {
 
 cmd_config_status() {
 	info "音箱端网页配置服务"
-	device_shell 'ubus call service list "{\"name\":\"sanyin_config\"}" 2>/dev/null; echo "== 进程 =="; ps w | grep "[s]anyin-config" || true; echo "== 端口 =="; netstat -lntp 2>/dev/null | grep ":8787 " || true; echo "== 配置 =="; if [ -s /mnt/UDISK/sanyin-config/web-password ]; then echo "authentication=enabled"; else echo "authentication=disabled"; fi'
+	device_shell 'ubus call service list "{\"name\":\"sanyin_config\"}" 2>/dev/null; echo "== 进程 =="; ps w | grep "[s]anyin-config" || true; echo "== 端口 =="; netstat -lntp 2>/dev/null | grep ":8787 " || true; echo "== 版本 =="; /mnt/UDISK/sanyin-config/sanyin-config -version 2>/dev/null || true; echo "== 配置 =="; if [ -s /mnt/UDISK/sanyin-config/web-password ]; then echo "authentication=enabled"; else echo "authentication=disabled"; fi; if [ -s /mnt/UDISK/sanyin-config/update-public-key ] && [ -x /usr/bin/sanyin_apply_update.sh ]; then echo "web_update=enabled"; else echo "web_update=disabled"; fi; echo "== 最近更新 =="; cat /mnt/UDISK/sanyin-config/update/update-status 2>/dev/null || true'
 }
 
 cmd_config_install() {
@@ -349,10 +462,17 @@ cmd_config_install() {
 	[[ -f "$CONFIG_INIT_SCRIPT" ]] || die "缺少启动脚本：$CONFIG_INIT_SCRIPT"
 	[[ -f "$EQ_PROBE_SCRIPT" ]] || die "缺少 EQ 验收脚本：$EQ_PROBE_SCRIPT"
 	[[ -f "$WIFI_SWITCH_SCRIPT" ]] || die "缺少 Wi-Fi 切换脚本：$WIFI_SWITCH_SCRIPT"
+	[[ -f "$UPDATE_APPLY_SCRIPT" ]] || die "缺少网页更新应用脚本：$UPDATE_APPLY_SCRIPT"
 	ensure_replace_allowed "$CONFIG_BINARY" /mnt/UDISK/sanyin-config/sanyin-config
 	ensure_replace_allowed "$CONFIG_INIT_SCRIPT" /etc/init.d/sanyin_config
 	ensure_replace_allowed "$EQ_PROBE_SCRIPT" /usr/bin/sanyin_eq_probe.sh
 	ensure_replace_allowed "$WIFI_SWITCH_SCRIPT" /usr/bin/sanyin_wifi_switch.sh
+	ensure_replace_allowed "$UPDATE_APPLY_SCRIPT" /usr/bin/sanyin_apply_update.sh
+	if [[ -f "$UPDATE_PUBLIC_KEY" ]]; then
+		ensure_replace_allowed "$UPDATE_PUBLIC_KEY" /mnt/UDISK/sanyin-config/update-public-key
+	else
+		warn "未找到 $UPDATE_PUBLIC_KEY；本次安装不会启用网页更新。运行 npm run package:update -- X.Y.Z 可生成签名密钥和公钥。"
+	fi
 	confirm "将在 $SERIAL 的 UDISK 和 overlay 中安装网页配置服务，并监听局域网 TCP 8787，继续吗？" || die "用户取消。"
 
 	local suffix="$$"
@@ -360,10 +480,16 @@ cmd_config_install() {
 	local remote_init="/tmp/sanyin-config.init.$suffix"
 	local remote_eq_probe="/tmp/sanyin-eq-probe.$suffix"
 	local remote_wifi_switch="/tmp/sanyin-wifi-switch.$suffix"
-	adb_run push "$CONFIG_BINARY" "$remote_binary"
-	adb_run push "$CONFIG_INIT_SCRIPT" "$remote_init"
-	adb_run push "$EQ_PROBE_SCRIPT" "$remote_eq_probe"
-	adb_run push "$WIFI_SWITCH_SCRIPT" "$remote_wifi_switch"
+	local remote_update_apply="/tmp/sanyin-update-apply.$suffix"
+	local remote_update_public_key="/tmp/sanyin-update-public-key.$suffix"
+	device_push "$CONFIG_BINARY" "$remote_binary"
+	device_push "$CONFIG_INIT_SCRIPT" "$remote_init"
+	device_push "$EQ_PROBE_SCRIPT" "$remote_eq_probe"
+	device_push "$WIFI_SWITCH_SCRIPT" "$remote_wifi_switch"
+	device_push "$UPDATE_APPLY_SCRIPT" "$remote_update_apply"
+	if [[ -f "$UPDATE_PUBLIC_KEY" ]]; then
+		device_push "$UPDATE_PUBLIC_KEY" "$remote_update_public_key"
+	fi
 	device_shell 'mkdir -p /mnt/UDISK/sanyin-config'
 	device_shell mv "$remote_binary" /mnt/UDISK/sanyin-config/sanyin-config
 	device_shell chmod 0755 /mnt/UDISK/sanyin-config/sanyin-config
@@ -373,8 +499,14 @@ cmd_config_install() {
 	device_shell chmod 0755 /usr/bin/sanyin_eq_probe.sh
 	device_shell mv "$remote_wifi_switch" /usr/bin/sanyin_wifi_switch.sh
 	device_shell chmod 0700 /usr/bin/sanyin_wifi_switch.sh
+	device_shell mv "$remote_update_apply" /usr/bin/sanyin_apply_update.sh
+	device_shell chmod 0700 /usr/bin/sanyin_apply_update.sh
+	if [[ -f "$UPDATE_PUBLIC_KEY" ]]; then
+		device_shell mv "$remote_update_public_key" /mnt/UDISK/sanyin-config/update-public-key
+		device_shell chmod 0644 /mnt/UDISK/sanyin-config/update-public-key
+	fi
 
-	device_shell '/etc/init.d/sanyin_config enable'
+	device_shell '/etc/init.d/sanyin_config enabled >/dev/null 2>&1 || /etc/init.d/sanyin_config enable'
 	device_shell '/etc/init.d/sanyin_config restart'
 	sleep 1
 	cmd_config_status
@@ -397,7 +529,7 @@ cmd_config_auth_enable() {
 	password_temp="$(mktemp -t sanyin-web-password.XXXXXX)"
 	chmod 0600 "$password_temp"
 	printf '%s\n' "$generated_password" > "$password_temp"
-	adb_run push "$password_temp" /tmp/sanyin-web-password
+	device_push "$password_temp" /tmp/sanyin-web-password
 	rm -f "$password_temp"
 	device_shell 'mkdir -p /mnt/UDISK/sanyin-config'
 	device_shell mv /tmp/sanyin-web-password /mnt/UDISK/sanyin-config/web-password
@@ -415,6 +547,88 @@ cmd_config_auth_disable() {
 	cmd_config_status
 }
 
+cmd_ssh_enable() {
+	local public_key="${1:-}"
+	[[ -n "$public_key" ]] || die "用法：sanyinctl ssh-enable /path/to/key.pub"
+	[[ -r "$public_key" ]] || die "SSH 公钥不可读：$public_key"
+	local nonempty_lines
+	nonempty_lines="$(awk 'NF {count++} END {print count+0}' "$public_key")"
+	[[ "$nonempty_lines" -eq 1 ]] || die "SSH 公钥文件必须只包含一条非空公钥。"
+	grep -Eq '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp(256|384|521))[[:space:]][A-Za-z0-9+/]+={0,3}([[:space:]].*)?$' "$public_key" || die "只接受标准 RSA、Ed25519 或 ECDSA OpenSSH 公钥。"
+	check_model
+	local use_dropbear=0
+	if device_test 'test -x /usr/sbin/dropbear && test -x /etc/init.d/dropbear'; then
+		use_dropbear=1
+	else
+		[[ -f "$SSH_SERVER_BINARY" ]] || die "固件没有 Dropbear，且缺少 $SSH_SERVER_BINARY。请先运行 npm run build:armv7。"
+		[[ -f "$SSH_SERVER_INIT" ]] || die "缺少三音 SSH 启动脚本：$SSH_SERVER_INIT"
+		ensure_replace_allowed "$SSH_SERVER_BINARY" /mnt/UDISK/sanyin-ssh/sanyin-sshd
+		ensure_replace_allowed "$SSH_SERVER_INIT" /etc/init.d/sanyin_sshd
+	fi
+
+	confirm "将在 $SERIAL 中加入指定 SSH 公钥，并启用仅公钥认证的 SSH 服务，继续吗？" || die "用户取消。"
+	local remote_key="/tmp/sanyin-ssh-key.$$"
+	device_push "$public_key" "$remote_key"
+	if [[ "$use_dropbear" -eq 1 ]]; then
+		device_shell "set -e
+mkdir -p /etc/dropbear
+touch /etc/dropbear/authorized_keys
+chmod 0700 /etc/dropbear
+chmod 0600 /etc/dropbear/authorized_keys
+key=\$(sed -n '1p' '$remote_key' | tr -d '\\r')
+grep -Fqx \"\$key\" /etc/dropbear/authorized_keys || printf '%s\\n' \"\$key\" >>/etc/dropbear/authorized_keys
+rm -f '$remote_key'
+if uci -q get dropbear.@dropbear[0] >/dev/null 2>&1; then
+	uci set dropbear.@dropbear[0].PasswordAuth=off
+	uci set dropbear.@dropbear[0].RootPasswordAuth=off
+	uci commit dropbear
+fi
+/etc/init.d/dropbear enable
+/etc/init.d/dropbear restart"
+	else
+		local remote_binary="/tmp/sanyin-sshd.$$"
+		local remote_init="/tmp/sanyin-sshd.init.$$"
+		device_push "$SSH_SERVER_BINARY" "$remote_binary"
+		device_push "$SSH_SERVER_INIT" "$remote_init"
+		device_shell "set -e
+mkdir -p /mnt/UDISK/sanyin-ssh
+chmod 0700 /mnt/UDISK/sanyin-ssh
+touch /mnt/UDISK/sanyin-ssh/authorized_keys
+chmod 0600 /mnt/UDISK/sanyin-ssh/authorized_keys
+key=\$(sed -n '1p' '$remote_key' | tr -d '\\r')
+grep -Fqx \"\$key\" /mnt/UDISK/sanyin-ssh/authorized_keys || printf '%s\\n' \"\$key\" >>/mnt/UDISK/sanyin-ssh/authorized_keys
+mv '$remote_binary' /mnt/UDISK/sanyin-ssh/sanyin-sshd
+chmod 0755 /mnt/UDISK/sanyin-ssh/sanyin-sshd
+mv '$remote_init' /etc/init.d/sanyin_sshd
+chmod 0755 /etc/init.d/sanyin_sshd
+rm -f '$remote_key'
+rm -f /etc/rc.d/S121sanyin_sshd /etc/rc.d/K121sanyin_sshd /etc/rc.d/S124sanyin_sshd /etc/rc.d/K124sanyin_sshd
+/etc/init.d/sanyin_sshd enable
+/etc/init.d/sanyin_sshd restart"
+	fi
+
+	local ready=0 attempt
+	for ((attempt = 1; attempt <= 10; attempt++)); do
+		if device_test 'netstat -lnt 2>/dev/null | grep -q ":22 "'; then
+			ready=1
+			break
+		fi
+		sleep 1
+	done
+	[[ "$ready" -eq 1 ]] || die "SSH 服务已安装，但 10 秒内没有监听 TCP 22。"
+
+	local ip
+	ip="$(device_shell "ifconfig wlan0 2>/dev/null" | tr -d '\r' | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p' | head -n 1)"
+	if [[ "$use_dropbear" -eq 1 ]]; then
+		info "SSH 公钥已安装，固件 Dropbear 已启用。"
+	else
+		info "SSH 公钥已安装，三音 SSH 服务已启用。"
+	fi
+	if [[ -n "$ip" ]]; then
+		printf '验证命令：ssh -i /path/to/private-key root@%s\n' "$ip"
+	fi
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --adb)
@@ -427,6 +641,31 @@ while [[ $# -gt 0 ]]; do
             SERIAL="$2"
             shift 2
             ;;
+		--host)
+			[[ $# -ge 2 ]] || die "--host 需要 IP 或主机名"
+			SSH_HOST="$2"
+			shift 2
+			;;
+		--user)
+			[[ $# -ge 2 ]] || die "--user 需要用户名"
+			SSH_USER="$2"
+			shift 2
+			;;
+		--port)
+			[[ $# -ge 2 ]] || die "--port 需要端口"
+			SSH_PORT="$2"
+			shift 2
+			;;
+		--identity)
+			[[ $# -ge 2 ]] || die "--identity 需要私钥路径"
+			SSH_IDENTITY="$2"
+			shift 2
+			;;
+		--known-hosts)
+			[[ $# -ge 2 ]] || die "--known-hosts 需要文件路径"
+			SSH_KNOWN_HOSTS="$2"
+			shift 2
+			;;
         --yes|-y)
             ASSUME_YES=1
             shift
@@ -452,8 +691,11 @@ COMMAND="${1:-}"
 [[ -n "$COMMAND" ]] || { usage; exit 1; }
 shift || true
 
-find_adb
-find_device
+if [[ "$COMMAND" == "help" ]]; then
+	usage
+	exit 0
+fi
+find_transport
 
 case "$COMMAND" in
     doctor) cmd_doctor "$@" ;;
@@ -469,6 +711,6 @@ case "$COMMAND" in
 	config-password) cmd_config_password "$@" ;;
 	config-auth-enable) cmd_config_auth_enable "$@" ;;
 	config-auth-disable) cmd_config_auth_disable "$@" ;;
-    help) usage ;;
+	ssh-enable) cmd_ssh_enable "$@" ;;
     *) die "未知命令：${COMMAND}。使用 --help 查看帮助。" ;;
 esac

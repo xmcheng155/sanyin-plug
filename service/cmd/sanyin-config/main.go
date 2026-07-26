@@ -12,27 +12,57 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	assets "sanyin.local/config"
 	"sanyin.local/config/service/internal/adapter"
 	"sanyin.local/config/service/internal/api"
+	"sanyin.local/config/service/internal/domain"
+	"sanyin.local/config/service/internal/updater"
+)
+
+var (
+	version = "dev"
+	commit  = "unknown"
+	builtAt = "unknown"
 )
 
 func main() {
 	listen := flag.String("listen", "127.0.0.1:8787", "HTTP 监听地址")
-	mode := flag.String("mode", "mock", "运行模式：mock、adb 或 device")
+	mode := flag.String("mode", "mock", "运行模式：mock、adb、ssh 或 device")
 	adbPath := flag.String("adb", "", "ADB 可执行文件路径（adb 模式）")
 	serial := flag.String("serial", "", "ADB 设备序列号（adb 模式）")
+	sshPath := flag.String("ssh", "", "SSH 可执行文件路径（ssh 模式）")
+	sshHost := flag.String("ssh-host", "", "音箱 IP 或主机名（ssh 模式）")
+	sshUser := flag.String("ssh-user", "root", "SSH 用户名")
+	sshPort := flag.Int("ssh-port", 22, "SSH 端口")
+	sshIdentity := flag.String("ssh-identity", "", "SSH 私钥文件；默认使用 ssh-agent 或用户配置")
+	sshKnownHosts := flag.String("ssh-known-hosts", "", "独立的 SSH known_hosts 文件；默认使用用户 SSH 配置")
 	passwordFile := flag.String("password-file", "", "可选的 HTTP Basic Auth 密码文件；默认不启用登录认证")
+	updatePublicKey := flag.String("update-public-key", "", "网页更新 Ed25519 公钥文件；未配置时禁用网页更新")
+	updateStateDir := flag.String("update-state-dir", "", "网页更新状态与候选程序目录")
+	updateApplyScript := flag.String("update-apply-script", "", "通过健康检查和自动回滚应用更新的设备侧脚本")
+	showVersion := flag.Bool("version", false, "显示应用版本后退出")
 	flag.Parse()
+	if *showVersion {
+		fmt.Printf("sanyin-config %s\ncommit=%s\nbuiltAt=%s\n", version, commit, builtAt)
+		return
+	}
 
-	provider, err := buildProvider(*mode, *adbPath, *serial)
+	provider, err := buildProvider(*mode, *adbPath, *serial, *sshPath, *sshHost, *sshUser, *sshIdentity, *sshKnownHosts, *sshPort)
 	if err != nil {
 		log.Fatal(err)
 	}
-	apiHandler := api.NewHandler(provider)
+	build := domain.BuildInfo{Version: version, Commit: commit, BuiltAt: builtAt}
+	updateManager := updater.NewManager(updater.Config{
+		Build:         build,
+		PublicKeyFile: *updatePublicKey,
+		StateDir:      *updateStateDir,
+		ApplyScript:   *updateApplyScript,
+	})
+	apiHandler := api.NewHandler(provider, api.Options{Build: build, Updater: updateManager})
 	mux := http.NewServeMux()
 	mux.Handle(api.BasePath+"/", apiHandler)
 	mux.Handle(api.BasePath, apiHandler)
@@ -51,7 +81,7 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 	}
 
-	log.Printf("三音本地配置服务（%s）已启动：http://%s", provider.Environment(), *listen)
+	log.Printf("三音本地配置服务 %s（%s）已启动：http://%s", version, provider.Environment(), *listen)
 	if *passwordFile == "" {
 		log.Printf("网页登录认证未启用；同一局域网内可直接访问")
 	} else {
@@ -61,6 +91,11 @@ func main() {
 		log.Printf("当前不会连接设备或调用 AirPlay 恢复服务")
 	} else {
 		log.Printf("当前已连接真实设备；网页操作会明确要求二次确认并进行结果验收")
+		if updateManager.Info().UpdateEnabled {
+			log.Printf("签名网页更新已启用")
+		} else {
+			log.Printf("签名网页更新未启用")
+		}
 	}
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
@@ -134,12 +169,12 @@ func securityHeaders(next http.Handler) http.Handler {
 
 func init() {
 	flag.Usage = func() {
-		fmt.Println("用法：go run ./service/cmd/sanyin-config [-mode mock|adb|device] [-listen 127.0.0.1:8787]")
+		fmt.Println("用法：go run ./service/cmd/sanyin-config [-mode mock|adb|ssh|device] [-listen 127.0.0.1:8787]")
 		flag.PrintDefaults()
 	}
 }
 
-func buildProvider(mode, adbPath, serial string) (adapter.Provider, error) {
+func buildProvider(mode, adbPath, serial, sshPath, sshHost, sshUser, sshIdentity, sshKnownHosts string, sshPort int) (adapter.Provider, error) {
 	switch mode {
 	case "mock":
 		return adapter.NewMockProvider(), nil
@@ -163,9 +198,63 @@ func buildProvider(mode, adbPath, serial string) (adapter.Provider, error) {
 		}
 		log.Printf("ADB 设备：%s", resolvedSerial)
 		return provider, nil
+	case "ssh":
+		resolvedSSH, err := findSSH(sshPath, sshHost, sshUser, sshIdentity, sshKnownHosts, sshPort)
+		if err != nil {
+			return nil, err
+		}
+		provider := adapter.NewRealProvider(adapter.NewSSHShellRunner(resolvedSSH, sshUser, sshHost, sshIdentity, sshKnownHosts, sshPort))
+		device, _ := provider.ForScenario(provider.DefaultScenario())
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if _, err := device.Device(ctx); err != nil {
+			return nil, fmt.Errorf("通过 SSH 读取真实设备失败: %w", err)
+		}
+		log.Printf("SSH 设备：%s@%s:%d", sshUser, sshHost, sshPort)
+		return provider, nil
 	default:
-		return nil, fmt.Errorf("未知运行模式 %q；可选值为 mock、adb、device", mode)
+		return nil, fmt.Errorf("未知运行模式 %q；可选值为 mock、adb、ssh、device", mode)
 	}
+}
+
+var sshUserPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+func findSSH(configured, host, user, identity, knownHosts string, port int) (string, error) {
+	if host == "" || strings.HasPrefix(host, "-") || strings.ContainsAny(host, " \t\r\n/") {
+		return "", errors.New("ssh 模式需要有效的 -ssh-host")
+	}
+	if !sshUserPattern.MatchString(user) {
+		return "", errors.New("SSH 用户名包含非法字符")
+	}
+	if port < 1 || port > 65535 {
+		return "", errors.New("SSH 端口必须为 1..65535")
+	}
+	if identity != "" {
+		info, err := os.Stat(identity)
+		if err != nil || info.IsDir() {
+			return "", fmt.Errorf("SSH 私钥不可读: %s", identity)
+		}
+	}
+	if knownHosts != "" {
+		info, err := os.Stat(knownHosts)
+		if err != nil || info.IsDir() {
+			return "", fmt.Errorf("SSH known_hosts 不可读: %s", knownHosts)
+		}
+	}
+	if configured != "" {
+		path, err := filepath.Abs(configured)
+		if err == nil {
+			if info, statErr := os.Stat(path); statErr == nil && !info.IsDir() && info.Mode()&0111 != 0 {
+				return path, nil
+			}
+		}
+		return "", fmt.Errorf("SSH 不可执行: %s", configured)
+	}
+	path, err := exec.LookPath("ssh")
+	if err != nil {
+		return "", errors.New("未找到 ssh")
+	}
+	return path, nil
 }
 
 func findADB(configured string) (string, error) {

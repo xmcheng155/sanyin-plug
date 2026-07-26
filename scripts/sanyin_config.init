@@ -7,6 +7,9 @@ DEPEND=netease_cc_service,netease_player_service,network
 
 PROGRAM=/mnt/UDISK/sanyin-config/sanyin-config
 PASSWORD_FILE=/mnt/UDISK/sanyin-config/web-password
+UPDATE_PUBLIC_KEY=/mnt/UDISK/sanyin-config/update-public-key
+UPDATE_STATE_DIR=/mnt/UDISK/sanyin-config/update
+UPDATE_APPLY_SCRIPT=/usr/bin/sanyin_apply_update.sh
 WIFI_SWITCH=/usr/bin/sanyin_wifi_switch.sh
 
 start_service() {
@@ -16,7 +19,15 @@ start_service() {
 	fi
 
 	procd_open_instance
-	if [ -s "$PASSWORD_FILE" ]; then
+	if [ -s "$UPDATE_PUBLIC_KEY" ] && [ -x "$UPDATE_APPLY_SCRIPT" ]; then
+		mkdir -p "$UPDATE_STATE_DIR"
+		chmod 0700 "$UPDATE_STATE_DIR"
+		if [ -s "$PASSWORD_FILE" ]; then
+			procd_set_param command "$PROGRAM" -mode device -listen 0.0.0.0:8787 -password-file "$PASSWORD_FILE" -update-public-key "$UPDATE_PUBLIC_KEY" -update-state-dir "$UPDATE_STATE_DIR" -update-apply-script "$UPDATE_APPLY_SCRIPT"
+		else
+			procd_set_param command "$PROGRAM" -mode device -listen 0.0.0.0:8787 -update-public-key "$UPDATE_PUBLIC_KEY" -update-state-dir "$UPDATE_STATE_DIR" -update-apply-script "$UPDATE_APPLY_SCRIPT"
+		fi
+	elif [ -s "$PASSWORD_FILE" ]; then
 		procd_set_param command "$PROGRAM" -mode device -listen 0.0.0.0:8787 -password-file "$PASSWORD_FILE"
 	else
 		procd_set_param command "$PROGRAM" -mode device -listen 0.0.0.0:8787
